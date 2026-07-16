@@ -1,0 +1,67 @@
+# boxkite-client
+
+A Python client for a **hosted** boxkite control-plane — create sandboxes,
+run commands, edit files, over HTTP. Not the boxkite package itself
+(`boxkite-sandbox`, which embeds `SandboxManager` against your own
+Kubernetes cluster) — use this to talk to *someone else's* running
+control-plane, hosted or self-hosted, over its API.
+
+## Install
+
+```bash
+pip install boxkite-client
+pip install boxkite-client[langchain]  # for create_sandbox_tools
+```
+
+## Quickstart
+
+```python
+from boxkite_client import BoxkiteClient
+
+client = BoxkiteClient(base_url="https://your-control-plane.example.com", api_key="bxk_live_...")
+
+with client.sandbox(label="demo") as sb:
+    result = sb.exec("python3 -c 'print(1 + 1)'")
+    print(result["stdout"])  # "2\n"
+
+    sb.file_create("notes.txt", "hello from boxkite-client\n")
+    print(sb.view("notes.txt")["content"])
+# sandbox is destroyed automatically here, even if an exception was raised above
+```
+
+Also available: `AsyncBoxkiteClient` (same shapes, `async`/`await`),
+file/directory search (`ls`/`glob`/`grep`), long-running background
+processes (`start_process`/`get_process_output`/`stop_process`), signed
+preview URLs for exposing a port, an audit-log feed (`get_log`/`watch`),
+interactive human takeover over a raw WebSocket, desktop (GUI) takeover
+over the same raw-WebSocket pattern, and a `create_sandbox_tools()`
+LangChain factory. Full reference with examples
+for all of these: [`docs/API.md`](https://github.com/HarshitKmr10/boxkite/blob/main/docs/API.md).
+
+## Error handling
+
+Every non-2xx response raises `BoxkiteApiError` (`.status_code`, `.code`,
+`.message`). A network-level failure raises `BoxkiteConnectionError`. Both
+subclass `BoxkiteError`.
+
+```python
+from boxkite_client import BoxkiteApiError
+
+try:
+    client.exec(sandbox["id"], "echo hi")
+except BoxkiteApiError as exc:
+    if exc.code == "concurrent_sandbox_limit_reached":
+        ...  # back off, destroy an old session, etc.
+```
+
+## Development
+
+```bash
+pip install -e ".[dev,langchain]"
+pytest tests/
+```
+
+Tests mock the control-plane with `httpx.MockTransport` — no real deployment needed.
+
+See the [root README](https://github.com/HarshitKmr10/boxkite#readme) for
+what boxkite is and the full self-hosting story.

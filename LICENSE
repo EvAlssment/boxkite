@@ -1,0 +1,103 @@
+# Functional Source License, Version 1.1, Apache 2.0 Future License
+
+## Abbreviation
+
+MIT
+
+## Terms and Conditions
+
+### Licensor ("We")
+
+The party offering the Software under these Terms and Conditions.
+
+### The Software
+
+The "Software" is each version of the software that we make available under
+these Terms and Conditions, as indicated by our inclusion of these Terms and
+Conditions with the Software.
+
+### License Grant
+
+Subject to your compliance with this License Grant and the Patents,
+Redistribution and Trademark clauses below, we hereby grant you the right to
+use, copy, modify, create derivative works, publicly perform, publicly
+display and redistribute the Software for any Permitted Purpose identified
+below.
+
+### Permitted Purpose
+
+A Permitted Purpose is any purpose other than a Competing Use. A Competing
+Use means making the Software available to others in a commercial product
+or service that:
+
+1. substitutes for the Software;
+2. substitutes for any other product or service we offer using the Software
+   that exists as of the date we make the Software available (including,
+   without limitation, a hosted or managed version of this sandbox offered
+   as a paid service); or
+3. offers the same or substantially similar functionality as the Software.
+
+Permitted Purposes specifically include using the Software:
+
+1. for your own internal use and access, including running it as part of
+   your own product or agent infrastructure that you do not resell as a
+   substitute for the Software itself;
+2. for non-commercial education;
+3. for non-commercial research; and
+4. in connection with professional services (consulting, integration,
+   support) that you provide to a licensee using the Software in accordance
+   with these Terms.
+
+### Patents
+
+To the extent your use for a Permitted Purpose would necessarily infringe
+our patents, the license grant above includes a license under our patents.
+If you make a claim against any party that the Software infringes or
+contributes to the infringement of any patent, then your patent license to
+the Software ends immediately.
+
+### Redistribution
+
+The Terms and Conditions apply to all copies, modifications and derivatives
+of the Software. If you redistribute any copies, modifications or
+derivatives of the Software, you must include a copy of or a link to these
+Terms and Conditions and not remove any copyright notices provided in or
+with the Software.
+
+### Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS" AND WITHOUT WARRANTIES OF ANY KIND, EITHER
+EXPRESS OR IMPLIED, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE OR NON-INFRINGEMENT.
+IN NO EVENT WILL WE HAVE ANY LIABILITY TO YOU ARISING OUT OF OR RELATED TO
+THE SOFTWARE, INCLUDING INDIRECT, SPECIAL, INCIDENTAL OR CONSEQUENTIAL
+DAMAGES, EVEN IF WE HAVE BEEN INFORMED OF THEIR POSSIBILITY IN ADVANCE. THIS
+DISCLAIMER APPLIES WITH PARTICULAR FORCE GIVEN THAT THE SOFTWARE EXECUTES
+ARBITRARY CODE: YOU ARE SOLELY RESPONSIBLE FOR EVALUATING WHETHER YOUR
+DEPLOYMENT, CONFIGURATION, AND OPERATIONAL PRACTICES PROVIDE ADEQUATE
+ISOLATION FOR YOUR THREAT MODEL BEFORE RUNNING UNTRUSTED OR AGENT-GENERATED
+CODE.
+
+### Trademarks
+
+Except for displaying the License Details and identifying us as the origin
+of the Software, you have no right under these Terms and Conditions to use
+our trademarks, trade names, service marks or product names.
+
+## Grant of Future License
+
+We hereby irrevocably grant you an additional license to use the Software
+under the Apache License, Version 2.0, effective on the second anniversary
+of the date we make each version of the Software available. On or after
+that date for a given version, you may use that version of the Software
+under either the Apache License, Version 2.0, or these Terms and
+Conditions, at your option.
+
+---
+
+This is the Functional Source License, Sentry's FSL 1.1 template
+(functionalsource.io) with the Apache-2.0 future license variant and a
+two-year change date. It is not a substitute for legal advice — if you plan
+to build a commercial offering on top of this software, or you are unsure
+whether your intended use qualifies as a Permitted Purpose, consult counsel
+before relying on this license.

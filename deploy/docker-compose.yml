@@ -1,0 +1,226 @@
+# Docker Compose for Local Development
+# Simulates K8s pod with sandbox + sidecar + storage (MinIO/S3 or Azure Blob)
+#
+# Usage:
+#   cd deploy
+#   docker-compose up -d
+#
+# Test:
+#   curl http://localhost:8080/health
+#   curl -X POST http://localhost:8080/exec \
+#     -H "Content-Type: application/json" \
+#     -H "X-Sidecar-Auth-Token: $SIDECAR_AUTH_TOKEN" \
+#     -d '{"command": "python3 -c \"print(1+1)\""}'
+#   (every route except /health requires that header — see SECURITY.md)
+#
+# Storage backends:
+#   Default: MinIO (S3-compatible) for local development
+#   Azure: Set STORAGE_BACKEND=azure and provide Azure credentials in .env
+
+version: '3.8'
+
+services:
+  # Sandbox container - runs user code
+  sandbox:
+    # Pinned Chrome-for-Testing version has no linux/arm64 build (the
+    # Dockerfile deliberately fails fast rather than silently shipping a
+    # broken browser) — force linux/amd64 so `docker compose up --build`
+    # works out of the box on Apple Silicon, at the cost of a slower
+    # emulated build. Real deployments target linux/amd64 anyway.
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: deploy/sandbox.Dockerfile
+    container_name: sandbox
+    # Keep alive for docker exec from sidecar
+    command: ["tail", "-f", "/dev/null"]
+    # Security settings
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Resource limits
+    mem_limit: 4g
+    cpus: 2
+    # Shared volumes with sidecar
+    volumes:
+      - uploads:/mnt/user-data/uploads:ro
+      - outputs:/mnt/user-data/outputs
+      - skills:/mnt/skills:ro
+      - workspace:/workspace
+      - tmp:/tmp
+    # Network isolation (sandbox can't reach internet)
+    networks:
+      - sandbox-internal
+    # Environment (minimal, no secrets)
+    environment:
+      PATH: "/usr/local/bin:/usr/bin:/bin"
+      HOME: "/workspace"
+      LANG: "C.UTF-8"
+      PYTHONUNBUFFERED: "1"
+
+  # Sidecar container - HTTP API and S3 sync
+  sidecar:
+    # Match the sandbox container's platform — they share the pod's network
+    # namespace via nsenter in real K8s mode, and running mixed
+    # architectures here would be an unnecessary difference from prod.
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: deploy/sidecar.Dockerfile
+    container_name: sidecar
+    # Compose has no pod securityContext, so keep the local sidecar runtime
+    # aligned with K8s while the image itself defaults to non-root for scanning.
+    user: "0"
+    ports:
+      - "8080:8080"
+    # Mount docker socket for docker exec into sandbox.
+    #
+    # CRITICAL, local-dev-only: this is a full host-root escape primitive.
+    # Anyone with a live connection to this socket can
+    # `docker run --privileged -v /:/host ...` and read/write the HOST
+    # machine's filesystem as root -- verified directly, including that a
+    # docker-socket-proxy does NOT meaningfully close this (its ACL model
+    # gates by API path/verb, not by request body fields like `Privileged`
+    # or `Binds` -- see SECURITY.md's "Known follow-ups" for the full
+    # writeup and how this was tested). The only thing standing between
+    # sandboxed code and this socket is SIDECAR_AUTH_TOKEN gating the
+    # sidecar's own HTTP API -- any future bug there (auth bypass, path
+    # traversal, command injection) escalates straight to host compromise.
+    # This does not exist in the Kubernetes runtime (deploy/pod-template.yaml
+    # has no docker socket at all) -- do not run this compose stack as
+    # anything other than a single-developer local dev environment.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - uploads:/mnt/user-data/uploads
+      - outputs:/mnt/user-data/outputs
+      - skills:/mnt/skills
+      - workspace:/workspace
+      - tmp:/tmp
+    # Can reach minio and sandbox
+    networks:
+      - sandbox-internal
+      - default
+    # Environment - storage backend configurable via .env
+    environment:
+      RUNTIME_MODE: "compose"
+      # SECURITY: shared secret required on every sidecar HTTP request except
+      # /health (defense in depth on top of this network's isolation — see
+      # src/boxkite/sidecar_auth.py and SECURITY.md). `:?` makes `docker
+      # compose up` fail loudly instead of silently starting an unauthenticated
+      # sidecar if SIDECAR_AUTH_TOKEN isn't set in .env. Whatever process
+      # embeds SandboxManager must be given the SAME value (as SIDECAR_AUTH_TOKEN
+      # in its own environment) so it can send it back on every call — see
+      # the README quickstart.
+      SIDECAR_AUTH_TOKEN: "${SIDECAR_AUTH_TOKEN:?Set SIDECAR_AUTH_TOKEN in .env — see .env.example (openssl rand -hex 32)}"
+      # Storage backend selection (s3 or azure)
+      STORAGE_BACKEND: "${STORAGE_BACKEND:-s3}"
+      # === S3/MinIO Configuration (default for local dev) ===
+      S3_ENDPOINT: "${S3_ENDPOINT-http://minio:9000}"
+      S3_BUCKET: "${S3_BUCKET:-boxkite-sandbox}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-minioadmin}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-minioadmin}"
+      # === Azure Blob Storage Configuration ===
+      AZURE_STORAGE_CONNECTION_STRING: "${AZURE_STORAGE_CONNECTION_STRING:-}"
+      AZURE_STORAGE_ACCOUNT_NAME: "${AZURE_STORAGE_ACCOUNT_NAME:-}"
+      AZURE_STORAGE_ACCOUNT_KEY: "${AZURE_STORAGE_ACCOUNT_KEY:-}"
+      AZURE_STORAGE_CONTAINER: "${AZURE_STORAGE_CONTAINER:-boxkite-sandbox}"
+    depends_on:
+      - sandbox
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Dev-mode HashiCorp Vault - TEST STAND-IN ONLY. In every real deployment
+  # the vault is the CUSTOMER'S infrastructure; the platform holds a pointer
+  # + scoped read-role and needs nothing but network egress to it. This
+  # service exists solely for vault pointer-credential integration tests
+  # (backend/tests/test_vault_integration.py) and fde-validation manifest 16.
+  #
+  # Gated behind a profile so `docker compose up -d` NEVER starts it:
+  #   docker compose --profile vault up -d    (or: docker compose up -d vault)
+  # Dev mode: in-memory, unsealed, root token "dev-root". Tests skip
+  # automatically when this isn't running.
+  vault:
+    image: hashicorp/vault:1.16
+    container_name: vault
+    profiles: ["vault"]
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "dev-root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - default
+
+  # MinIO - S3-compatible storage for local dev
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      # Bound to localhost only -- MinIO's admin/admin default credential is
+      # a well-known convention safe for a local-only service, but NOT safe
+      # to expose beyond localhost (e.g. a cloud VM demo with a permissive
+      # firewall/security group). If you need to reach this from another
+      # host, change the credentials first, then widen the bind address.
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # Console
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: "minioadmin"
+      MINIO_ROOT_PASSWORD: "minioadmin"
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # MinIO setup - create bucket on startup
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing myminio/boxkite-sandbox;
+      echo 'Bucket created';
+      exit 0;
+      "
+    networks:
+      - default
+
+volumes:
+  uploads:
+  outputs:
+  skills:
+  workspace:
+  tmp:
+  minio-data:
+
+networks:
+  sandbox-internal:
+    # Internal network - no internet access for sandbox.
+    # NOTE: the sidecar is also attached to this network (required so the
+    # sandbox-side tool bridge can call the sidecar's /tool-call endpoint),
+    # which means a sandboxed command could technically reach sidecar:8080
+    # too. There is no NetworkPolicy-style segmentation here to prevent
+    # that; the only thing blocking it is that SIDECAR_AUTH_TOKEN is never
+    # given to the sandbox container's environment, so such a request would
+    # be rejected as unauthenticated. See the comment on exec_in_sandbox's
+    # compose-mode branch in sidecar/main.py for the full writeup.
+    internal: true
+  default:
+    # Default network - sidecar and minio can communicate

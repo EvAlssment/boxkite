@@ -1,0 +1,136 @@
+version: 2
+
+updates:
+  # ── Python package (src/, pyproject.toml) ─────────────────────────────────
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    # A newly published version can be malicious or unstable (supply-chain
+    # attacks routinely ship, then get pulled, within days) — wait a week
+    # before Dependabot opens a PR for it, giving the ecosystem time to
+    # flag a bad release before it reaches this repo.
+    cooldown:
+      default-days: 7
+    groups:
+      python-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
+  # ── control-plane/ (fastapi, sqlalchemy, asyncpg, pyjwt, passlib/argon2-cffi
+  # -- the auth-bearing multi-tenant API surface) ────────────────────────────
+  - package-ecosystem: pip
+    directory: /control-plane
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      control-plane-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
+  # ── sdk-python/ (published PyPI package) ──────────────────────────────────
+  - package-ecosystem: pip
+    directory: /sdk-python
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      sdk-python-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
+  # ── mcp-server/ (published PyPI package) ──────────────────────────────────
+  - package-ecosystem: pip
+    directory: /mcp-server
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      mcp-server-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
+  # ── deploy/ (npm; skill JS deps baked into the sandbox image) ─────────────
+  - package-ecosystem: npm
+    directory: /deploy
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      deploy-npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+      - deploy
+
+  # ── sdk-js/ (published npm package) ────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /sdk-js
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      sdk-js-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
+  # ── Docker base images (sandbox.Dockerfile, sidecar.Dockerfile) ───────────
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    labels:
+      - dependencies
+      - docker
+
+  # ── control-plane/Dockerfile base image ────────────────────────────────────
+  - package-ecosystem: docker
+    directory: /control-plane
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    labels:
+      - dependencies
+      - docker
+
+  # ── GitHub Actions themselves (.github/workflows/*.yml action versions) ──
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+      - ci
