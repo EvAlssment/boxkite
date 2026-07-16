@@ -65,7 +65,7 @@ jobs:
       # arm64 rather than shipping a broken browser (same constraint
       # enforced in deploy/docker-compose.yml and .github/workflows/ci.yml).
       - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: deploy/sandbox.Dockerfile
@@ -98,7 +98,7 @@ jobs:
       # deploy/sandbox.Dockerfile's amd64-only Chrome-for-Testing step, so
       # both platforms build cleanly.
       - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: deploy/sandbox-minimal.Dockerfile
@@ -132,7 +132,7 @@ jobs:
       # util-linux-misc, procps, curl, docker-cli) and a `uv pip install` step —
       # none of that is x86_64-only, so both platforms build cleanly.
       - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: deploy/sidecar.Dockerfile
@@ -167,7 +167,7 @@ jobs:
       # image needs the sibling `boxkite` package at ../src — see the
       # Dockerfile's own header comment.
       - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: control-plane/Dockerfile
