@@ -9,18 +9,18 @@
 
 # Data Processing
 pandas==3.0.3
-numpy==2.4.6
+numpy==2.5.1
 polars==1.42.1
 
 # Visualization
 matplotlib==3.11.0
 seaborn==0.13.2
-plotly==6.8.0
+plotly==6.9.0
 
 # Scientific Computing
 # Capped below 1.18 -- scipy 1.18.0 requires Python>=3.12, incompatible with
 # this image's Python 3.11 runtime (uv pip compile fails outright otherwise).
-scipy==1.17.1
+scipy==1.18.0
 scikit-learn==1.9.0
 statsmodels==0.14.6
 
@@ -60,7 +60,7 @@ pytz==2026.2
 
 # Output Formatting
 tabulate==0.10.0
-tqdm==4.68.3
+tqdm==4.68.4
 
 # Templating
 jinja2==3.1.6
