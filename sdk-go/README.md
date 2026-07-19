@@ -1,5 +1,7 @@
 # boxkite (Go client)
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/EvAlssment/boxkite/sdk-go.svg)](https://pkg.go.dev/github.com/EvAlssment/boxkite/sdk-go)
+
 A Go client for a **hosted** boxkite control-plane — create sandboxes, run
 commands, edit files, over HTTP. Mirrors `sdk-python`'s `BoxkiteClient`
 (PyPI: `boxkite-client`) and `sdk-js`'s `BoxkiteClient` (npm:
