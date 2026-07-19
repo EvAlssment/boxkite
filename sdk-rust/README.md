@@ -1,5 +1,7 @@
 # boxkite-client (Rust)
 
+[![crates.io](https://img.shields.io/crates/v/boxkite-client.svg)](https://crates.io/crates/boxkite-client)
+
 A Rust client for a **hosted** boxkite control-plane — create sandboxes, run
 commands, edit files, over HTTP/WebSocket. Not the `boxkite` package itself
 (the self-hosted Python core that embeds `SandboxManager` against your own

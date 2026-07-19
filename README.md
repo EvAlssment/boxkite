@@ -10,6 +10,7 @@
   <a href="https://pypi.org/project/boxkite-sandbox/"><img alt="PyPI" src="https://img.shields.io/pypi/v/boxkite-sandbox?label=PyPI"></a>
   <a href="https://www.npmjs.com/package/boxkite-client"><img alt="npm" src="https://img.shields.io/npm/v/boxkite-client?label=npm"></a>
   <a href="https://pkg.go.dev/github.com/EvAlssment/boxkite/sdk-go"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/EvAlssment/boxkite/sdk-go.svg"></a>
+  <a href="https://crates.io/crates/boxkite-client"><img alt="crates.io" src="https://img.shields.io/crates/v/boxkite-client.svg"></a>
 </p>
 
 <p align="center">
@@ -145,10 +146,7 @@ covers the same ground with runnable examples.
 | `boxkite-client` (JS/TS) | [npm](https://www.npmjs.com/package/boxkite-client) |
 | `boxkite-mcp` | [PyPI](https://pypi.org/project/boxkite-mcp/) |
 | `boxkite-client` (Go) | [pkg.go.dev](https://pkg.go.dev/github.com/EvAlssment/boxkite/sdk-go) |
-
-`sdk-rust` is a real, tested SDK not yet published to crates.io — see
-[#182](https://github.com/EvAlssment/boxkite/issues/182) and its own README for
-the git-based install in the meantime.
+| `boxkite-client` (Rust) | [crates.io](https://crates.io/crates/boxkite-client) |
 
 ## License
 
