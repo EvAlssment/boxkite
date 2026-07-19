@@ -143,10 +143,11 @@ covers the same ground with runnable examples.
 | `boxkite-client` (Python) | [PyPI](https://pypi.org/project/boxkite-client/) |
 | `boxkite-client` (JS/TS) | [npm](https://www.npmjs.com/package/boxkite-client) |
 | `boxkite-mcp` | [PyPI](https://pypi.org/project/boxkite-mcp/) |
+| `boxkite-client` (Go) | [pkg.go.dev](https://pkg.go.dev/github.com/EvAlssment/boxkite/sdk-go) |
 
-`sdk-go`/`sdk-rust` are real, tested SDKs not yet published to
-pkg.go.dev/crates.io — see [#182](https://github.com/EvAlssment/boxkite/issues/182)
-and each SDK's own README for the git-based install in the meantime.
+`sdk-rust` is a real, tested SDK not yet published to crates.io — see
+[#182](https://github.com/EvAlssment/boxkite/issues/182) and its own README for
+the git-based install in the meantime.
 
 ## License
 
