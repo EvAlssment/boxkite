@@ -31,7 +31,7 @@ def _all_app_routes() -> list[tuple[str, str]]:
     framework scaffolding.
     """
     pairs: list[tuple[str, str]] = []
-    for route in sidecar_main.app.routes:
+    for route in _iter_leaf_routes(sidecar_main.app.routes):
         path = getattr(route, "path", None)
         methods = getattr(route, "methods", None)
         if not path or not methods:
@@ -43,6 +43,29 @@ def _all_app_routes() -> list[tuple[str, str]]:
                 continue
             pairs.append((method, path))
     return pairs
+
+
+def _iter_leaf_routes(routes):
+    """Yield every leaf route, descending through included/mounted sub-routers.
+
+    FastAPI 0.139's `app.include_router()` doesn't flatten routes into
+    `app.routes`; it inserts a lazy `_IncludedRouter` wrapper whose real
+    routes live under `.original_router.routes`. Starlette mounts similarly
+    nest under `.routes`. A flat walk of `app.routes` therefore sees only the
+    handful of routes declared directly with `@app.<method>` (which is why
+    this test — and the auth-coverage test below — silently degraded to just
+    `/health` + `/metrics`). Recurse so both track the real route surface.
+    """
+    for route in routes:
+        included = getattr(route, "original_router", None)
+        if included is not None and getattr(included, "routes", None) is not None:
+            yield from _iter_leaf_routes(included.routes)
+            continue
+        nested = getattr(route, "routes", None)
+        if nested and not getattr(route, "path", None):
+            yield from _iter_leaf_routes(nested)
+            continue
+        yield route
 
 
 def test_route_inventory_matches_known_sidecar_routes():

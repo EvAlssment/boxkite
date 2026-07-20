@@ -567,6 +567,8 @@ class PodLifecycleMixin:
         self._cache_pod_tls_cert(pod_name, tls_cert_pem)
 
         # Create pod (handle conflict if pod already exists)
+        import time as _time
+        _t_create0 = _time.monotonic()
         try:
             await self._k8s_core_api.create_namespaced_pod(namespace=SANDBOX_NAMESPACE, body=pod)
         except ApiException as e:
@@ -615,12 +617,22 @@ class PodLifecycleMixin:
         # forever: it's invisible to both the idle reaper (requires
         # status=claimed AND Running with a pod_ip) and WarmPoolManager's
         # own stale-pod scan (only reaps pods it manages itself).
+        logger.info(f"[TIMING] k8s_create_pod_api: {(_time.monotonic() - _t_create0)*1000:.0f}ms")
+        # Readiness wait isolates node scheduling + image-pull cost — the
+        # dominant, cluster-scale-dependent term the warm pool exists to
+        # amortize (issue #178). On a small dev cluster with images already
+        # cached this is cheap, which is exactly why cold-start there can look
+        # deceptively close to a warm claim; on a production-scale cluster
+        # paying real scheduling/image-pull cost it is where the warm pool's
+        # advantage actually shows up.
+        _t_ready0 = _time.monotonic()
         try:
             pod_ip = await self._wait_for_pod_ready(pod_name)
         except Exception:
             logger.error(f"[SandboxManager] Pod {pod_name} failed to become ready; cleaning up")
             await self._delete_pod(pod_name)
             raise
+        logger.info(f"[TIMING] k8s_pod_readiness_wait: {(_time.monotonic() - _t_ready0)*1000:.0f}ms")
         return pod_ip
 
     async def _wait_for_pod_ready(
