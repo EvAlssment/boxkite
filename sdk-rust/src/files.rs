@@ -3,6 +3,7 @@
 //! field-for-field against `control_plane.schemas`'s `Sandbox*Request`/
 //! `Sandbox*Response` models.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::Method;
@@ -50,6 +51,66 @@ pub struct ExecResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Optional `http_request` parameters.
+#[derive(Debug, Clone, Default)]
+pub struct HttpRequestOptions {
+    headers: Option<HashMap<String, String>>,
+    body: Option<String>,
+    timeout: Option<u32>,
+}
+
+impl HttpRequestOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request headers. A value may contain a literal `{{secret:name}}`
+    /// reference for a secret granted to this session via
+    /// [`CreateSandboxOptions::secret_names`](crate::CreateSandboxOptions::secret_names);
+    /// the sidecar substitutes the real value in-process -- this SDK never
+    /// sees it.
+    pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.headers = Some(headers);
+        self
+    }
+
+    /// Request body. May contain `{{secret:name}}` references, same as
+    /// [`HttpRequestOptions::headers`].
+    pub fn body(mut self, body: impl Into<String>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// Request timeout in seconds.
+    pub fn timeout(mut self, timeout: u32) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+}
+
+#[derive(Serialize)]
+struct HttpRequestBody<'a> {
+    method: &'a str,
+    url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<&'a HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout: Option<u32>,
+}
+
+/// `POST /v1/sandboxes/{id}/http-request`'s response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HttpRequestResult {
+    pub status_code: i32,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    pub body: String,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// A single optional `description` field shared by every file-op request --
@@ -301,6 +362,39 @@ impl Client {
         };
         let mut builder = self
             .request(Method::POST, &format!("/v1/sandboxes/{session_id}/exec"))
+            .json(&body);
+        if let Some(timeout) = options.timeout {
+            builder = builder.timeout(Duration::from_secs(timeout as u64) + EXEC_TIMEOUT_HEADROOM);
+        }
+        self.send(builder).await
+    }
+
+    /// `POST /v1/sandboxes/{id}/http-request` -- the secrets-broker HTTP
+    /// request proxy (`docs/SECRETS-DESIGN.md`). `options.headers`/
+    /// `options.body` may contain a literal `{{secret:name}}` reference for a
+    /// secret granted to this session via
+    /// [`CreateSandboxOptions::secret_names`](crate::CreateSandboxOptions::secret_names);
+    /// the sidecar substitutes the real value in-process -- this SDK never
+    /// sees the credential.
+    pub async fn http_request(
+        &self,
+        session_id: &str,
+        method: &str,
+        url: &str,
+        options: HttpRequestOptions,
+    ) -> Result<HttpRequestResult, BoxkiteError> {
+        let body = HttpRequestBody {
+            method,
+            url,
+            headers: options.headers.as_ref(),
+            body: options.body.as_deref(),
+            timeout: options.timeout,
+        };
+        let mut builder = self
+            .request(
+                Method::POST,
+                &format!("/v1/sandboxes/{session_id}/http-request"),
+            )
             .json(&body);
         if let Some(timeout) = options.timeout {
             builder = builder.timeout(Duration::from_secs(timeout as u64) + EXEC_TIMEOUT_HEADROOM);

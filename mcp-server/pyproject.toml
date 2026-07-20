@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "boxkite-mcp"
-version = "0.2.0"
-description = "MCP server exposing a hosted boxkite control-plane (sandbox lifecycle, exec, files) as native tools for MCP-compatible clients (Claude Code, Claude Desktop, Cursor, etc.)."
+version = "0.2.1"
+description = "MCP server exposing a hosted boxkite control-plane (sandbox lifecycle, exec, files) as native tools for MCP-compatible clients (Claude Code, Claude Desktop, Codex, Cursor, etc.)."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"

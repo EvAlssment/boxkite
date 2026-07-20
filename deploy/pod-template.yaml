@@ -158,6 +158,8 @@ spec:
         - SETGID      # Required by nsenter's own --setgid flag (privilege drop to SANDBOX_GID)
         drop:
         - ALL
+      seccompProfile:
+        type: RuntimeDefault
 
     # Resource limits — must match resource_config.py's
     # DEFAULT_SANDBOX_SIDECAR_* constants (see test_pod_template_parity.py).

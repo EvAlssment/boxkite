@@ -210,8 +210,8 @@ async def _spawn_node_interpreter() -> "_NodeInterpreterHandle":
     """Start a fresh persistent Node.js interpreter process.
 
     Mirrors _spawn_interpreter's exact namespace-entry mechanism (same
-    nsenter/unshare flags in K8s mode, same docker-exec user in compose
-    mode, same SAFE_EXEC_ENV). Memory is capped via `--max-old-space-size`
+    nsenter/unshare flags, same UID drop, same SAFE_EXEC_ENV, in both
+    runtime modes). Memory is capped via `--max-old-space-size`
     instead of `ulimit -v` -- see NODE_INTERPRETER_MAX_MEMORY_MB's own
     comment in main.py for why a Python-style `ulimit -v` doesn't work for
     V8.
@@ -226,20 +226,14 @@ async def _spawn_node_interpreter() -> "_NodeInterpreterHandle":
         f"exec node --max-old-space-size={main.NODE_INTERPRETER_MAX_MEMORY_MB} {script_path}"
     )
 
-    if main.RUNTIME_MODE == "compose":
-        # SECURITY: -u flag ensures the interpreter runs as the sandbox
-        # user, not root -- see exec_in_sandbox's compose branch for the
-        # matching network-isolation caveat that also applies here.
-        cmd = ["docker", "exec", "-i", "-u", str(main.SANDBOX_UID), "sandbox", "sh", "-c", shell_command]
-    else:
-        sandbox_pid = main.get_sandbox_pid()
-        if not sandbox_pid:
-            try:
-                os.remove(script_path)
-            except OSError:
-                pass
-            raise RuntimeError("Failed to find sandbox process")
-        cmd = main.build_k8s_exec_command(sandbox_pid, shell_command)
+    sandbox_pid = main.get_sandbox_pid()
+    if not sandbox_pid:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+        raise RuntimeError("Failed to find sandbox process")
+    cmd = main.build_k8s_exec_command(sandbox_pid, shell_command)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

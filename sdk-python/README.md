@@ -58,6 +58,25 @@ except BoxkiteApiError as exc:
         ...  # back off, destroy an old session, etc.
 ```
 
+## Retries
+
+Automatic retry is **off by default**. Pass a `RetryConfig` to enable it;
+`RetryConfig()` carries sensible defaults (2 retries, exponential backoff
+with full jitter, `Retry-After` honored):
+
+```python
+from boxkite_client import BoxkiteClient, RetryConfig
+
+client = BoxkiteClient(base_url="...", api_key="...", retry=RetryConfig())
+```
+
+Only idempotent verbs (`GET`/`HEAD`/`PUT`/`DELETE`/`OPTIONS`) are retried,
+and only on a connection failure or a transient status (429, 500, 502, 503,
+504) — a non-idempotent `POST` (create-sandbox/secret/webhook) is never
+retried, so this can't double-create a resource. `AsyncBoxkiteClient` takes
+the same `retry=` argument and awaits its backoff. Every field of
+`RetryConfig` is tunable if the defaults don't fit.
+
 ## Development
 
 ```bash
@@ -66,6 +85,15 @@ pytest tests/
 ```
 
 Tests mock the control-plane with `httpx.MockTransport` — no real deployment needed.
+
+## Related tools
+
+Moving an in-progress local Claude Code/Codex CLI/opencode session (full
+conversation history, not just a diff) into a fresh boxkite sandbox is
+handled by the separate `boxkite-handoff` CLI, built on this SDK — see
+[`../docs/handoff-adapters.md`](../docs/handoff-adapters.md) and
+[`../handoff-cli/README.md`](../handoff-cli/README.md). Not yet published
+to PyPI.
 
 See the [root README](https://github.com/EvAlssment/boxkite#readme) for
 what boxkite is and the full self-hosting story.

@@ -133,6 +133,47 @@ def test_pod_template_matches_manager_capabilities_drop():
     )
 
 
+_SECCOMP_RUNTIME_DEFAULT_RE = re.compile(
+    r'seccomp_profile=client\.V1SeccompProfile\(\s*type=["\']RuntimeDefault["\']\s*\)'
+)
+
+
+def _seccomp_runtime_default_count_in_source(source_text: str) -> int:
+    """Count `seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault")`
+    occurrences -- one per container security context (sandbox + sidecar)."""
+    return len(_SECCOMP_RUNTIME_DEFAULT_RE.findall(source_text))
+
+
+def _pod_template_container_seccomp_type(container_name: str) -> str | None:
+    doc = yaml.safe_load(POD_TEMPLATE_PATH.read_text())
+    for container in doc["spec"]["containers"]:
+        if container["name"] == container_name:
+            return (
+                container.get("securityContext", {})
+                .get("seccompProfile", {})
+                .get("type")
+            )
+    raise AssertionError(f"No '{container_name}' container found in pod-template.yaml")
+
+
+def test_manager_py_sets_seccomp_runtime_default_on_both_containers():
+    """Regression test for Issue #10: pod-template.yaml advertised
+    seccompProfile: RuntimeDefault but manager.py's real pod spec set none,
+    so runtime pods ran with the unconfined seccomp profile the template
+    claimed to constrain. Both the sandbox and sidecar security contexts
+    must set it."""
+    assert _seccomp_runtime_default_count_in_source(MANAGER_SOURCE_PATH.read_text()) == 2
+
+
+def test_warm_pool_py_sets_seccomp_runtime_default_on_both_containers():
+    assert _seccomp_runtime_default_count_in_source(WARM_POOL_SOURCE_PATH.read_text()) == 2
+
+
+def test_pod_template_sets_seccomp_runtime_default_on_both_containers():
+    assert _pod_template_container_seccomp_type("sandbox") == "RuntimeDefault"
+    assert _pod_template_container_seccomp_type("sidecar") == "RuntimeDefault"
+
+
 def test_pod_template_documents_sys_admin_residual_risk():
     text = POD_TEMPLATE_PATH.read_text()
     assert "CAP_SYS_ADMIN" in text

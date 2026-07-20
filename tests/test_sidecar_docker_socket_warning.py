@@ -1,6 +1,9 @@
 """Tests for the sidecar's startup-time warning when it can reach the host's
-Docker socket (SECURITY.md's CRITICAL, local-dev-only finding about
-deploy/docker-compose.yml's socket mount).
+Docker socket. Neither deploy/pod-template.yaml nor deploy/docker-compose.yml
+mounts this socket (compose mode switched from `docker exec` to nsenter, so
+it no longer needs the socket at all) -- this warning is now a regression
+tripwire for a custom/misconfigured deployment reintroducing the mount, not
+an expected condition. See `_warn_if_docker_socket_mounted`'s docstring.
 
 Exercises `_warn_if_docker_socket_mounted()` directly rather than actually
 starting the app -- it's the entire detection/warning logic that runs from

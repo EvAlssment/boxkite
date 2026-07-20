@@ -17,8 +17,10 @@ from .exceptions import BoxkiteApiError, BoxkiteConnectionError
 
 
 def create_sandbox_tools(client: BoxkiteClient, session_id: str) -> list:
-    """Create the seven sandbox tools (bash_tool, file_create, view,
-    str_replace, ls, glob, grep) bound to one session_id on one client.
+    """Create the twelve sandbox tools (bash_tool, file_create, view,
+    str_replace, ls, glob, grep, start_process, get_process_output,
+    send_process_input, stop_process, list_processes) bound to one
+    session_id on one client.
 
     Each tool catches BoxkiteApiError and returns a descriptive string
     instead of raising -- an uncaught exception here would kill whatever

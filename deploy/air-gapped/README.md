@@ -48,14 +48,16 @@ longer step 1.
 `docker-compose.airgapped.yml` originally named the sandbox container
 `sandbox-airgapped` (to avoid clashing with `../docker-compose.yml`'s own
 `sandbox` container name). That broke `/exec` at runtime with `Error
-response from daemon: No such container: sandbox` — `sidecar/sidecar_execution.py`'s
-`exec_in_sandbox()` (and `sidecar_browser.py`, `sidecar_interpreter.py`,
-`sidecar_node_interpreter.py`, `sidecar_processes.py`) all hardcode
-`docker exec ... sandbox ...` as a literal container name, not a
-configurable one. Fixed by keeping `container_name: sandbox` in this
-compose file too (see the inline comment) — this is a real constraint
-worth knowing if anyone ever wants to run more than one boxkite Compose
-stack side by side on the same Docker host.
+response from daemon: No such container: sandbox` at the time (when compose
+mode still used `docker exec` with a hardcoded container name). Compose mode
+now execs via `nsenter` after sharing a PID namespace with the sandbox
+container (`pid: "container:sandbox"`), which hardcodes the same literal
+name from the other direction — `get_sandbox_pid()` in `sidecar/main.py`
+finds the sandbox's init process by pgrep'ing for this exact container name.
+Fixed by keeping `container_name: sandbox` in this compose file too (see the
+inline comment) — this is a real constraint worth knowing if anyone ever
+wants to run more than one boxkite Compose stack side by side on the same
+Docker host.
 
 ## A real finding about the "already published" GHCR images
 
@@ -203,8 +205,8 @@ Added `myminio` successfully.
 Bucket created successfully `myminio/boxkite-sandbox`.
 ```
 
-`/exec` round-tripped through the sidecar's real `docker exec` path into
-the sandbox container and ran a real command — this is the actual product
+`/exec` round-tripped through the sidecar's real `nsenter` path into the
+sandbox container and ran a real command — this is the actual product
 functionality working end to end, entirely from images that were `docker
 load`ed from a tarball, with zero registry contact for the whole "air-gapped"
 half of this exercise.

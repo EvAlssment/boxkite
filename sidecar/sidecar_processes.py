@@ -127,47 +127,41 @@ async def _spawn_background_process(
 ) -> "asyncio.subprocess.Process":
     """Spawn a background process the same way exec_in_sandbox starts one
     (same nsenter/build_k8s_exec_command, same UID drop, same SAFE_EXEC_ENV,
-    same per-call fresh network namespace in K8s mode) but with a stdin pipe
-    and stdout+stderr merged, and without awaiting completion.
+    same per-call fresh network namespace) but with a stdin pipe and
+    stdout+stderr merged, and without awaiting completion.
 
     `expose_network=True` (only ever set when the caller supplied
     ProcessStartRequest.expose_port -- see docs/NETWORK-INGRESS-DESIGN.md)
     skips the fresh per-exec network namespace so this process's listening
     port stays reachable from the sidecar's own loopback for /preview
-    proxying. Compose mode already shares a Docker network with the sidecar
-    (see exec_in_sandbox's compose-mode comment), so there is no separate
-    isolation to skip there.
+    proxying.
 
     SECURITY: see exec_in_sandbox's docstring -- same UID drop, same
     sanitized environment, same caveats. No caller-supplied `env` is ever
     accepted (matches ExecRequest's own comment on this).
 
     Restart/orphan survival (docs/PROCESS-SESSIONS-DESIGN.md section 2(b)):
-    `start_new_session=True` makes the spawned command (nsenter in K8s mode)
-    a new process-group leader, so nsenter's own internal fork (required to
+    `start_new_session=True` makes the spawned nsenter command a new
+    process-group leader, so nsenter's own internal fork (required to
     actually enter the target PID namespace with `-p`) inherits that same
     group instead of silently escaping a group-wide kill -- verified
     directly that without this, killing only the tracked nsenter PID left
     the real sandboxed command running untouched. See
     `_signal_process_group` below, used by every teardown path instead of
-    `proc.kill()`/`proc.terminate()` directly. In K8s mode only, the marker
-    env var lets a freshly-restarted sidecar recognize and reap this
-    process's whole group if it survives a hard crash/OOM-kill of the
-    sidecar itself (see `_sweep_orphaned_background_processes`); compose
-    mode's `docker exec`-tracked remote process isn't visible to this
-    sidecar's own /proc, so the marker would be inert there.
+    `proc.kill()`/`proc.terminate()` directly. The marker env var lets a
+    freshly-restarted sidecar recognize and reap this process's whole group
+    if it survives a hard crash/OOM-kill of the sidecar itself (see
+    `_sweep_orphaned_background_processes`) -- both runtime modes share a
+    PID namespace with the sandbox container now (deploy/docker-compose.yml's
+    `pid: "container:sandbox"`), so this sidecar's own /proc sees the process
+    in either mode, not just K8s.
     """
-    if main.RUNTIME_MODE == "compose":
-        # -i keeps stdin open so /process/{id}/input can write to it.
-        cmd = ["docker", "exec", "-i", "-u", str(main.SANDBOX_UID), "sandbox", "sh", "-c", command]
-        env = dict(main.SAFE_EXEC_ENV)
-    else:
-        sandbox_pid = main.get_sandbox_pid()
-        if not sandbox_pid:
-            raise RuntimeError("Failed to find sandbox process")
-        cmd = main.build_k8s_exec_command(sandbox_pid, command, skip_network_isolation=expose_network)
-        env = dict(main.SAFE_EXEC_ENV)
-        env[main.BACKGROUND_PROCESS_MARKER_ENV] = main.BACKGROUND_PROCESS_MARKER_VALUE
+    sandbox_pid = main.get_sandbox_pid()
+    if not sandbox_pid:
+        raise RuntimeError("Failed to find sandbox process")
+    cmd = main.build_k8s_exec_command(sandbox_pid, command, skip_network_isolation=expose_network)
+    env = dict(main.SAFE_EXEC_ENV)
+    env[main.BACKGROUND_PROCESS_MARKER_ENV] = main.BACKGROUND_PROCESS_MARKER_VALUE
 
     return await asyncio.create_subprocess_exec(
         *cmd,
@@ -215,26 +209,23 @@ async def _process_reader_loop(handle: "ProcessHandle") -> None:
 def _signal_process_group(proc: "asyncio.subprocess.Process", sig: int) -> None:
     """Send `sig` to `proc`'s whole process group, not just `proc` itself.
 
-    Required for K8s-mode background processes: `_spawn_background_process`
-    wraps the real command in `nsenter -t <pid> -m -p ...`, and nsenter
-    forks internally to actually enter the target PID namespace (`-p`
-    cannot be applied to the calling process itself, only to a child it
-    creates after the fork) -- so `proc` (the tracked
-    `asyncio.subprocess.Process`) is nsenter's OWN pid, one level above the
-    real sandboxed command. This was verified directly against real
-    containers sharing a PID namespace (docs/PROCESS-SESSIONS-DESIGN.md
-    section 2(b)): signalling only `proc.pid` killed nsenter and left the
-    actual command it wrapped alive and running, reparented, untouched.
-    `_spawn_background_process` sets `start_new_session=True` so nsenter and
-    everything it forks share one process group -- `killpg` on that group
-    reaches all of them in one signal.
+    Required for background processes: `_spawn_background_process` wraps
+    the real command in `nsenter -t <pid> -m -p ...`, and nsenter forks
+    internally to actually enter the target PID namespace (`-p` cannot be
+    applied to the calling process itself, only to a child it creates after
+    the fork) -- so `proc` (the tracked `asyncio.subprocess.Process`) is
+    nsenter's OWN pid, one level above the real sandboxed command. This was
+    verified directly against real containers sharing a PID namespace
+    (docs/PROCESS-SESSIONS-DESIGN.md section 2(b)): signalling only
+    `proc.pid` killed nsenter and left the actual command it wrapped alive
+    and running, reparented, untouched. `_spawn_background_process` sets
+    `start_new_session=True` so nsenter and everything it forks share one
+    process group -- `killpg` on that group reaches all of them in one
+    signal. Applies the same way in both runtime modes now that both share
+    a PID namespace with the sandbox container.
 
     Falls back to signalling `proc.pid` directly if the group can't be
-    resolved (process already gone, or -- compose mode -- `proc` is the
-    local `docker exec` client, whose process group has at most that one
-    member locally; see this file's compose-mode caveats in
-    docs/PROCESS-SESSIONS-DESIGN.md for why compose mode's *remote* process
-    isn't reachable via any local signal at all).
+    resolved (process already gone).
 
     SAFETY: never `killpg` the CALLER's own process group. This matters
     whenever a spawned process was NOT actually given its own session (a
@@ -409,16 +400,14 @@ def _sweep_orphaned_background_processes() -> int:
     only be a leftover from a prior incarnation, never something legitimately
     in flight.
 
-    K8s-mode only, and only when SANDBOX_PROCESS_STARTUP_SWEEP_ENABLED
-    (default on): compose mode's `docker exec`-spawned remote process lives
-    in the `sandbox` container's own namespaces, tracked by the Docker
-    daemon, not by anything visible in this sidecar's own /proc -- this scan
-    would never see it. See docs/PROCESS-SESSIONS-DESIGN.md for that
-    caveat.
+    Only when SANDBOX_PROCESS_STARTUP_SWEEP_ENABLED (default on). Runs the
+    same way in both runtime modes -- both share a PID namespace with the
+    sandbox container (deploy/docker-compose.yml's `pid: "container:sandbox"`
+    in compose mode), so this sidecar's own /proc sees the marker either way.
 
     Returns the number of process groups killed.
     """
-    if main.RUNTIME_MODE == "compose" or not main.SANDBOX_PROCESS_STARTUP_SWEEP_ENABLED:
+    if not main.SANDBOX_PROCESS_STARTUP_SWEEP_ENABLED:
         return 0
 
     try:

@@ -18,7 +18,7 @@
 # - Generated commands can run in an isolated network namespace at runtime
 # - Runs as non-root user (UID 1001)
 
-FROM cgr.dev/chainguard/wolfi-base:latest
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:02dab76bd852a70556b5b2002195c8a5fdab77d323c433bf6642aab080489795
 
 RUN apk update && apk add --no-cache \
     ca-certificates \

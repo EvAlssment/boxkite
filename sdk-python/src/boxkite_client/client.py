@@ -9,8 +9,14 @@ testing (httpx.MockTransport) -- real callers never need it.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
+import time
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -24,6 +30,87 @@ DEFAULT_TIMEOUT = 30.0
 EXEC_TIMEOUT_HEADROOM = 15.0
 
 _LOCALHOST_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+
+# 429 (rate limited) plus the transient 5xx family -- retrying a 500 that
+# reflects a deterministic server bug won't help, but these are the codes a
+# control-plane returns for load/restart/upstream blips worth re-attempting.
+DEFAULT_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Only verbs the control-plane treats as idempotent are safe to blind-retry:
+# a retried POST could double-create a sandbox/secret/webhook. PUT/DELETE on
+# this API are idempotent by resource id, so they stay in.
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
+
+
+@dataclass(frozen=True)
+class RetryConfig:
+    """Opt-in automatic retry for transient failures. Pass an instance as
+    `retry=` to either client to enable it; the defaults here are the
+    "sensible default" -- construct `RetryConfig()` to accept them.
+
+    Only idempotent verbs (see `methods`) are ever retried, and only on a
+    connection failure or a status in `statuses` (429 + transient 5xx). A
+    non-idempotent POST is never retried, so enabling this can't
+    double-create a resource. Backoff is exponential with full jitter; a
+    `Retry-After` header (seconds or HTTP-date) is honored when present and
+    `respect_retry_after` is set.
+    """
+
+    max_retries: int = 2
+    backoff_base: float = 0.5
+    backoff_max: float = 30.0
+    statuses: frozenset[int] = DEFAULT_RETRY_STATUSES
+    methods: frozenset[str] = IDEMPOTENT_METHODS
+    respect_retry_after: bool = True
+
+
+def _parse_retry_after(value: str) -> float | None:
+    """Parse a Retry-After header (delta-seconds or an HTTP-date) into a
+    non-negative delay in seconds, or None if it can't be understood."""
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return max(0.0, float(int(value)))
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+
+
+def _retry_delay(config: RetryConfig, attempt: int, retry_after: float | None) -> float:
+    """Delay before the next attempt (0-indexed `attempt`). A server-supplied
+    Retry-After wins over computed backoff; otherwise full-jitter exponential
+    backoff, capped at `backoff_max`."""
+    if retry_after is not None:
+        return min(config.backoff_max, retry_after)
+    ceiling = min(config.backoff_max, config.backoff_base * (2**attempt))
+    return random.uniform(0, ceiling)
+
+
+def _retry_after_from(config: RetryConfig, resp: httpx.Response) -> float | None:
+    if not config.respect_retry_after:
+        return None
+    header = resp.headers.get("Retry-After")
+    return _parse_retry_after(header) if header else None
+
+
+def _should_retry(config: RetryConfig | None, method: str, attempt: int, status: int | None) -> bool:
+    if config is None or attempt >= config.max_retries:
+        return False
+    if method.upper() not in config.methods:
+        return False
+    # status None == a connection-level failure (no response reached us);
+    # safe to retry for an idempotent verb since the server may never have
+    # seen the request.
+    return status is None or status in config.statuses
 
 
 def _validate_base_url_scheme(base_url: str) -> None:
@@ -117,12 +204,14 @@ class BoxkiteClient:
         api_key: str,
         *,
         timeout: float = DEFAULT_TIMEOUT,
+        retry: RetryConfig | None = None,
         transport: httpx.BaseTransport | None = None,
         ws_connect: Callable[..., Any] | None = None,
     ) -> None:
         _validate_base_url_scheme(base_url)
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._retry = retry
         self._ws_connect = ws_connect or _default_sync_ws_connect
         self._http = httpx.Client(
             base_url=self._base_url,
@@ -141,12 +230,22 @@ class BoxkiteClient:
         self.close()
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        try:
-            resp = self._http.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise BoxkiteConnectionError(str(exc)) from exc
-        _raise_for_error(resp)
-        return resp.json() if resp.content else None
+        attempt = 0
+        while True:
+            try:
+                resp = self._http.request(method, path, **kwargs)
+            except httpx.HTTPError as exc:
+                if _should_retry(self._retry, method, attempt, None):
+                    time.sleep(_retry_delay(self._retry, attempt, None))
+                    attempt += 1
+                    continue
+                raise BoxkiteConnectionError(str(exc)) from exc
+            if _should_retry(self._retry, method, attempt, resp.status_code):
+                time.sleep(_retry_delay(self._retry, attempt, _retry_after_from(self._retry, resp)))
+                attempt += 1
+                continue
+            _raise_for_error(resp)
+            return resp.json() if resp.content else None
 
     def account(self) -> dict:
         """GET /v1/account -- identity for the API key in use."""
@@ -1023,12 +1122,14 @@ class AsyncBoxkiteClient:
         api_key: str,
         *,
         timeout: float = DEFAULT_TIMEOUT,
+        retry: RetryConfig | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         ws_connect: Callable[..., Any] | None = None,
     ) -> None:
         _validate_base_url_scheme(base_url)
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._retry = retry
         self._ws_connect = ws_connect or _default_async_ws_connect
         self._http = httpx.AsyncClient(
             base_url=self._base_url,
@@ -1047,12 +1148,22 @@ class AsyncBoxkiteClient:
         await self.aclose()
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        try:
-            resp = await self._http.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise BoxkiteConnectionError(str(exc)) from exc
-        _raise_for_error(resp)
-        return resp.json() if resp.content else None
+        attempt = 0
+        while True:
+            try:
+                resp = await self._http.request(method, path, **kwargs)
+            except httpx.HTTPError as exc:
+                if _should_retry(self._retry, method, attempt, None):
+                    await asyncio.sleep(_retry_delay(self._retry, attempt, None))
+                    attempt += 1
+                    continue
+                raise BoxkiteConnectionError(str(exc)) from exc
+            if _should_retry(self._retry, method, attempt, resp.status_code):
+                await asyncio.sleep(_retry_delay(self._retry, attempt, _retry_after_from(self._retry, resp)))
+                attempt += 1
+                continue
+            _raise_for_error(resp)
+            return resp.json() if resp.content else None
 
     async def account(self) -> dict:
         return await self._request("GET", "/v1/account")

@@ -150,7 +150,7 @@ app.add_typer(webhooks_app, name="webhooks")
 mcp_app = typer.Typer(
     help=(
         "Wire boxkite's MCP server into an MCP-compatible client's own config file "
-        "(Claude Code, Cursor, Windsurf, Claude Desktop). Hosted mode only -- reads "
+        "(Claude Code, Cursor, Windsurf, Claude Desktop, Codex). Hosted mode only -- reads "
         "the base_url/api_key already saved by `boxkite signup` or `boxkite config`."
     ),
     no_args_is_help=True,

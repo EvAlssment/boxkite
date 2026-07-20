@@ -29,13 +29,15 @@ router = APIRouter()
 # ============================================================================
 
 def get_sandbox_pid() -> Optional[int]:
-    """Get PID of sandbox container's init process."""
-    if main.RUNTIME_MODE == "compose":
-        # In docker-compose, we use docker exec instead
-        return None
+    """Get PID of sandbox container's init process.
 
-    # In K8s with shared PID namespace, find the sandbox process
-    # The sandbox runs "tail -f /dev/null" as PID 1
+    Works identically in K8s (containers in one pod always share a PID
+    namespace) and compose mode (deploy/docker-compose.yml gives the sidecar
+    `pid: "container:sandbox"` specifically so this pgrep-based lookup finds
+    the same process it would in a real pod) -- both share a PID namespace
+    with the sandbox container, so both can see its init process this way.
+    """
+    # Find the sandbox process. The sandbox runs "tail -f /dev/null" as PID 1
     try:
         result = subprocess.run(
             ["pgrep", "-f", "tail -f /dev/null"],
@@ -135,10 +137,15 @@ async def exec_in_sandbox(
     extra_env: Optional[dict[str, str]] = None,
 ) -> tuple[int, str, str]:
     """
-    Execute command in sandbox container.
-
-    In K8s: Uses nsenter to enter sandbox PID namespace
-    In Docker Compose: Uses docker exec
+    Execute command in sandbox container, via nsenter + privilege dropping --
+    identically in K8s and compose mode (see get_sandbox_pid's docstring for
+    why compose mode can use the same nsenter path as K8s). When enabled,
+    the command runs in a fresh network namespace so it cannot reach IMDS,
+    private endpoints, the sidecar's own HTTP port, or the public internet
+    directly -- this used to be K8s-only (compose fell back to `docker exec`,
+    which always joins the target container's *existing* network namespace
+    with no way to give it a fresh one per call); both modes now go through
+    build_k8s_exec_command so this isolation is no longer compose-only-absent.
 
     SECURITY:
     - Commands run as UID 1001 (sandbox user), NOT as root
@@ -146,44 +153,19 @@ async def exec_in_sandbox(
       server-resolved `extra_env`, never caller-supplied literal values --
       see ExecRequest.secret_env) are passed
     - No sidecar credentials (Azure/S3) are leaked to the subprocess
-    - When enabled, K8s commands run in a fresh network namespace so generated
-      code cannot reach IMDS, private endpoints, or public Internet directly.
     - No arbitrary caller-supplied environment variables are accepted here
       (see the comment on ExecRequest) — only the fixed SAFE_EXEC_ENV, plus
       `extra_env` values this function's own caller already resolved
       server-side from a granted secret name, are ever passed to the
       exec'd process.
     """
-    if main.RUNTIME_MODE == "compose":
-        # Docker Compose mode - use docker exec with explicit user
-        # SECURITY: -u flag ensures commands run as sandbox user, not root
-        #
-        # SECURITY (network isolation gap, compose mode only): the sidecar
-        # container shares the `sandbox-internal` Docker network with the
-        # sandbox container (see deploy/docker-compose.yml) because the
-        # sandbox-side tool bridge legitimately needs to reach the sidecar's
-        # /tool-call endpoint over that network — unlike K8s, this exec path
-        # does not use nsenter + a fresh network namespace (see
-        # build_k8s_exec_command / SANDBOX_EXEC_NETWORK_ISOLATION_ENABLED), so
-        # a command run here could in principle also reach sidecar:8080
-        # itself. There is currently no K8s-style NetworkPolicy segmenting
-        # that reachability away in compose. The only thing standing between
-        # a sandboxed command and the sidecar's HTTP API in this mode is that
-        # SIDECAR_AUTH_TOKEN is never handed to the sandbox container's
-        # environment, so any such request fails the enforce_sidecar_auth
-        # check above (401/503) — this is an auth-token-absence mitigation,
-        # not a network-isolation one. Do not rely on this exec path for
-        # network-level containment in compose mode.
-        cmd = ["docker", "exec", "-u", str(main.SANDBOX_UID), "sandbox", "sh", "-c", command]
-    else:
-        # K8s mode - use nsenter with privilege dropping. The exec'd command
-        # inherits this subprocess's env directly, so merging into `env=` below
-        # is sufficient (no argv exposure).
-        sandbox_pid = main.get_sandbox_pid()
-        if not sandbox_pid:
-            return 1, "", "Failed to find sandbox process"
+    # The exec'd command inherits this subprocess's env directly, so merging
+    # into `env=` below is sufficient (no argv exposure).
+    sandbox_pid = main.get_sandbox_pid()
+    if not sandbox_pid:
+        return 1, "", "Failed to find sandbox process"
 
-        cmd = main.build_k8s_exec_command(sandbox_pid, command)
+    cmd = main.build_k8s_exec_command(sandbox_pid, command)
 
     try:
         # SECURITY: Pass explicit env to prevent leaking sidecar credentials

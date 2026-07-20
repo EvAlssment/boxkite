@@ -1,6 +1,6 @@
 [package]
 name = "boxkite-client"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.75"
 description = "Rust client for a hosted boxkite control-plane (sandboxes, exec, files, audit log, human takeover)"
@@ -14,7 +14,7 @@ categories = ["api-bindings", "asynchronous"]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 reqwest-eventsource = "0.6"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
-tokio = { version = "1", features = ["net"] }
+tokio = { version = "1", features = ["net", "time"] }
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

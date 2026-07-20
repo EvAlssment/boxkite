@@ -205,8 +205,15 @@ async def test_spawn_background_process_k8s_mode_uses_new_session_and_marker(mon
     assert captured["args"][0] in ("nsenter", "unshare")
 
 
-async def test_spawn_background_process_compose_mode_has_no_marker(monkeypatch):
+async def test_spawn_background_process_compose_mode_also_gets_marker(monkeypatch):
+    """Compose mode used to skip the marker because docker exec's process
+    wasn't visible in this sidecar's own /proc. Since deploy/docker-compose.yml
+    now shares a PID namespace with the sandbox container (`pid:
+    "container:sandbox"`) and exec goes through the same nsenter path as K8s
+    mode (see get_sandbox_pid's docstring), the marker is visible and set
+    here too -- this is the inverse of what this test used to assert."""
     monkeypatch.setattr(sidecar_main, "RUNTIME_MODE", "compose")
+    monkeypatch.setattr(sidecar_main, "get_sandbox_pid", lambda: 999999)
 
     captured = {}
     real_create_subprocess_exec = asyncio.create_subprocess_exec
@@ -225,10 +232,10 @@ async def test_spawn_background_process_compose_mode_has_no_marker(monkeypatch):
     proc = await sidecar_main._spawn_background_process("echo hi")
     await proc.wait()
 
-    # Compose mode's remote process isn't visible to this sidecar's own
-    # /proc at all (see _sweep_orphaned_background_processes's docstring),
-    # so the marker would be inert there -- confirm it's simply not sent.
-    assert sidecar_main.BACKGROUND_PROCESS_MARKER_ENV not in captured["kwargs"]["env"]
+    assert (
+        captured["kwargs"]["env"][sidecar_main.BACKGROUND_PROCESS_MARKER_ENV]
+        == sidecar_main.BACKGROUND_PROCESS_MARKER_VALUE
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -366,10 +373,34 @@ async def test_sweep_leaves_unmarked_process_untouched(monkeypatch):
         await proc.wait()
 
 
-def test_sweep_skips_entirely_in_compose_mode(monkeypatch):
+@requires_proc
+async def test_sweep_also_reaps_marked_orphans_in_compose_mode(tmp_path, monkeypatch):
+    """Compose mode used to skip the startup sweep entirely, because docker
+    exec's process wasn't visible in this sidecar's own /proc. Since
+    deploy/docker-compose.yml now shares a PID namespace with the sandbox
+    container and exec goes through the same nsenter path as K8s mode, the
+    same reaping logic applies in both modes -- this is the inverse of what
+    this test used to assert (that compose mode was always a no-op sweep)."""
     monkeypatch.setattr(sidecar_main, "RUNTIME_MODE", "compose")
     monkeypatch.setattr(sidecar_main, "SANDBOX_PROCESS_STARTUP_SWEEP_ENABLED", True)
-    assert sidecar_main._sweep_orphaned_background_processes() == 0
+
+    marker_file = tmp_path / "orphan.pid"
+    env = dict(os.environ)
+    env[sidecar_main.BACKGROUND_PROCESS_MARKER_ENV] = sidecar_main.BACKGROUND_PROCESS_MARKER_VALUE
+    proc = await _spawn_fork_tree(marker_file, env=env)
+    orphan_pid = await _wait_for_marker_pid(marker_file)
+
+    reaped = sidecar_main._sweep_orphaned_background_processes()
+    assert reaped >= 1
+
+    for _ in range(200):
+        if not _is_alive(orphan_pid):
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("sweep did not reap the marked orphan in compose mode")
+
+    await _reap(proc)
 
 
 def test_sweep_respects_disabled_flag(monkeypatch):

@@ -14,8 +14,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +49,7 @@ type Client struct {
 	httpClient *http.Client
 	timeout    time.Duration
 	wsDialer   *websocket.Dialer
+	retry      *RetryConfig
 }
 
 // Option configures a Client constructed via NewClient.
@@ -73,6 +76,34 @@ func WithTimeout(d time.Duration) Option {
 func WithWebSocketDialer(d *websocket.Dialer) Option {
 	return func(c *Client) {
 		c.wsDialer = d
+	}
+}
+
+// WithRetry enables automatic retry of transient failures. Retry is
+// off by default -- pass this option (ideally starting from
+// DefaultRetryConfig()) to turn it on. Only idempotent verbs are retried,
+// and only on a connection failure or a retriable status (429 + transient
+// 5xx); a non-idempotent POST is never retried, so this cannot
+// double-create a resource. Zero-valued BackoffBase/BackoffMax/Statuses/
+// Methods fields are filled in from the defaults, so
+// WithRetry(RetryConfig{MaxRetries: 3}) is valid -- but RespectRetryAfter
+// stays false unless set, so prefer DefaultRetryConfig() as a base.
+func WithRetry(cfg RetryConfig) Option {
+	return func(c *Client) {
+		normalized := cfg
+		if normalized.BackoffBase <= 0 {
+			normalized.BackoffBase = defaultRetryBackoffBase
+		}
+		if normalized.BackoffMax <= 0 {
+			normalized.BackoffMax = defaultRetryBackoffMax
+		}
+		if normalized.Statuses == nil {
+			normalized.Statuses = defaultRetryStatuses
+		}
+		if normalized.Methods == nil {
+			normalized.Methods = idempotentMethods
+		}
+		c.retry = &normalized
 	}
 }
 
@@ -157,36 +188,25 @@ type requestOptions struct {
 	query        url.Values
 }
 
-// doJSON issues one HTTP request against the control-plane and decodes a
+// doJSON issues an HTTP request against the control-plane and decodes a
 // successful JSON response body into out (a pointer; pass nil for routes
 // with no response body, e.g. a 204). reqBody, if non-nil, is marshaled as
-// the JSON request body.
+// the JSON request body. When retry is enabled (see WithRetry) a transient
+// failure on an idempotent verb is re-attempted with backoff, honoring ctx
+// cancellation between attempts.
 func (c *Client) doJSON(ctx context.Context, method, path string, reqBody any, out any, opts *requestOptions) error {
-	var bodyReader io.Reader
+	var encoded []byte
 	if reqBody != nil {
-		encoded, err := json.Marshal(reqBody)
+		var err error
+		encoded, err = json.Marshal(reqBody)
 		if err != nil {
 			return fmt.Errorf("boxkite: encoding request body: %w", err)
 		}
-		bodyReader = bytes.NewReader(encoded)
 	}
 
 	fullURL := c.baseURL + path
 	if opts != nil && len(opts.query) > 0 {
 		fullURL += "?" + opts.query.Encode()
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return &ConnectionError{Message: err.Error(), Err: err}
-	}
-	authValue := "Bearer " + c.apiKey
-	if opts != nil && opts.authOverride != "" {
-		authValue = "Bearer " + opts.authOverride
-	}
-	req.Header.Set("Authorization", authValue)
-	if reqBody != nil {
-		req.Header.Set("Content-Type", "application/json")
 	}
 
 	httpClient := c.httpClient
@@ -196,27 +216,58 @@ func (c *Client) doJSON(ctx context.Context, method, path string, reqBody any, o
 		httpClient = &clientCopy
 	}
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return &ConnectionError{Message: err.Error(), Err: err}
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return &ConnectionError{Message: err.Error(), Err: err}
-	}
-
-	if resp.StatusCode >= 400 {
-		return apiErrorFromResponse(resp.StatusCode, respBody)
-	}
-
-	if out != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("boxkite: decoding response body: %w", err)
+	for attempt := 0; ; attempt++ {
+		var bodyReader io.Reader
+		if encoded != nil {
+			bodyReader = bytes.NewReader(encoded)
 		}
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
+		if err != nil {
+			return &ConnectionError{Message: err.Error(), Err: err}
+		}
+		authValue := "Bearer " + c.apiKey
+		if opts != nil && opts.authOverride != "" {
+			authValue = "Bearer " + opts.authOverride
+		}
+		req.Header.Set("Authorization", authValue)
+		if encoded != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			// status 0 == no response reached us (DNS/TLS/timeout/refused).
+			if ctx.Err() == nil && shouldRetry(c.retry, method, attempt, 0) {
+				if serr := sleepWithContext(ctx, retryDelay(c.retry, attempt, -1)); serr == nil {
+					continue
+				}
+			}
+			return &ConnectionError{Message: err.Error(), Err: err}
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return &ConnectionError{Message: readErr.Error(), Err: readErr}
+		}
+
+		if resp.StatusCode >= 400 {
+			if shouldRetry(c.retry, method, attempt, resp.StatusCode) {
+				delay := retryDelay(c.retry, attempt, retryAfterFrom(c.retry, resp))
+				if serr := sleepWithContext(ctx, delay); serr == nil {
+					continue
+				}
+			}
+			return apiErrorFromResponse(resp.StatusCode, respBody)
+		}
+
+		if out != nil && len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, out); err != nil {
+				return fmt.Errorf("boxkite: decoding response body: %w", err)
+			}
+		}
+		return nil
 	}
-	return nil
 }
 
 func apiErrorFromResponse(statusCode int, body []byte) error {
@@ -228,4 +279,130 @@ func apiErrorFromResponse(statusCode int, body []byte) error {
 		message = envelope.Error.Message
 	}
 	return &APIError{StatusCode: statusCode, Code: code, Message: message}
+}
+
+const (
+	defaultRetryMaxRetries  = 2
+	defaultRetryBackoffBase = 500 * time.Millisecond
+	defaultRetryBackoffMax  = 30 * time.Second
+)
+
+// defaultRetryStatuses is 429 (rate limited) plus the transient 5xx family.
+// Retrying a 500 that reflects a deterministic server bug won't help, but
+// these are the codes a control-plane returns for load/restart/upstream
+// blips worth re-attempting.
+var defaultRetryStatuses = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true}
+
+// idempotentMethods are the only verbs safe to blind-retry: a retried POST
+// could double-create a sandbox/secret/webhook. PUT/DELETE on this API are
+// idempotent by resource id, so they stay in.
+var idempotentMethods = map[string]bool{"GET": true, "HEAD": true, "PUT": true, "DELETE": true, "OPTIONS": true}
+
+// RetryConfig configures automatic retry of transient failures. Enable it
+// via WithRetry; retry is off entirely when no RetryConfig is set.
+type RetryConfig struct {
+	// MaxRetries is the number of retries after the initial attempt (so a
+	// total of MaxRetries+1 attempts). 0 disables retry.
+	MaxRetries int
+	// BackoffBase is the base of the exponential backoff (delay for the
+	// first retry is drawn from [0, BackoffBase)).
+	BackoffBase time.Duration
+	// BackoffMax caps any single backoff (and any honored Retry-After).
+	BackoffMax time.Duration
+	// Statuses is the set of response status codes that trigger a retry.
+	Statuses map[int]bool
+	// Methods is the set of (idempotent) HTTP verbs eligible for retry.
+	Methods map[string]bool
+	// RespectRetryAfter honors a server-supplied Retry-After header (delta
+	// seconds or HTTP-date) in preference to computed backoff.
+	RespectRetryAfter bool
+}
+
+// DefaultRetryConfig is the recommended starting point for WithRetry: 2
+// retries, exponential backoff with full jitter (500ms base, 30s cap),
+// retry on 429/500/502/503/504 for idempotent verbs, Retry-After honored.
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxRetries:        defaultRetryMaxRetries,
+		BackoffBase:       defaultRetryBackoffBase,
+		BackoffMax:        defaultRetryBackoffMax,
+		Statuses:          defaultRetryStatuses,
+		Methods:           idempotentMethods,
+		RespectRetryAfter: true,
+	}
+}
+
+func shouldRetry(cfg *RetryConfig, method string, attempt, status int) bool {
+	if cfg == nil || attempt >= cfg.MaxRetries {
+		return false
+	}
+	if !cfg.Methods[strings.ToUpper(method)] {
+		return false
+	}
+	if status == 0 {
+		return true
+	}
+	return cfg.Statuses[status]
+}
+
+// retryDelay returns the wait before the next attempt (0-indexed attempt). A
+// non-negative retryAfter (from the server) wins over computed backoff;
+// otherwise full-jitter exponential backoff, capped at BackoffMax.
+func retryDelay(cfg *RetryConfig, attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter >= 0 {
+		if retryAfter > cfg.BackoffMax {
+			return cfg.BackoffMax
+		}
+		return retryAfter
+	}
+	ceiling := cfg.BackoffBase << uint(attempt)
+	if ceiling <= 0 || ceiling > cfg.BackoffMax {
+		ceiling = cfg.BackoffMax
+	}
+	return time.Duration(rand.Float64() * float64(ceiling))
+}
+
+func retryAfterFrom(cfg *RetryConfig, resp *http.Response) time.Duration {
+	if cfg == nil || !cfg.RespectRetryAfter {
+		return -1
+	}
+	return parseRetryAfter(resp)
+}
+
+// parseRetryAfter parses a Retry-After header (delta-seconds or HTTP-date)
+// into a non-negative wait, or -1 when absent/unparseable.
+func parseRetryAfter(resp *http.Response) time.Duration {
+	value := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if value == "" {
+		return -1
+	}
+	if secs, err := strconv.Atoi(value); err == nil {
+		if secs < 0 {
+			secs = 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(value); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+		return 0
+	}
+	return -1
+}
+
+// sleepWithContext waits d, returning early with ctx.Err() if the context is
+// cancelled first -- honoring ctx cancellation between retry attempts.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d < 0 {
+		d = 0
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

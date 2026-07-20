@@ -701,6 +701,7 @@ class WarmPoolManager:
                             allow_privilege_escalation=False,
                             capabilities=client.V1Capabilities(drop=["ALL"]),
                             read_only_root_filesystem=True,
+                            seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
                         ),
                         resources=build_sandbox_container_resources(size=size),
                         volume_mounts=[
@@ -741,6 +742,7 @@ class WarmPoolManager:
                             # --setuid/--setgid privilege drop -- see manager.py's
                             # matching securityContext for the full note on each.
                             capabilities=client.V1Capabilities(add=["SYS_PTRACE", "SYS_ADMIN", "CHOWN", "SYS_CHROOT", "SETUID", "SETGID"], drop=["ALL"]),
+                            seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
                         ),
                         resources=build_sidecar_container_resources(size=size),
                         volume_mounts=sidecar_volume_mounts,

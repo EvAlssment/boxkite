@@ -432,6 +432,7 @@ class PodLifecycleMixin:
                             allow_privilege_escalation=False,
                             capabilities=client.V1Capabilities(drop=["ALL"]),
                             read_only_root_filesystem=True,
+                            seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
                         ),
                         # The sandbox container provides the filesystem/tooling
                         # image and namespaces. Runtime CPU/memory is lower here
@@ -503,6 +504,7 @@ class PodLifecycleMixin:
                             # NOTE: These capabilities are NOT inherited by agent code
                             # because nsenter drops to UID 1001 before exec.
                             capabilities=client.V1Capabilities(add=["SYS_PTRACE", "SYS_ADMIN", "CHOWN", "SYS_CHROOT", "SETUID", "SETGID"], drop=["ALL"]),
+                            seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"),
                         ),
                         # The sidecar owns the execution cgroup today, so it
                         # intentionally receives the larger default budget.

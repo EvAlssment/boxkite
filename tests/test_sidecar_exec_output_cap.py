@@ -69,6 +69,7 @@ async def test_exec_in_sandbox_kills_process_that_exceeds_output_cap(monkeypatch
     must be truncated at exactly the cap and the process must be killed
     rather than left to finish writing (or OOM the host)."""
     monkeypatch.setattr(sidecar_main, "RUNTIME_MODE", "compose")
+    monkeypatch.setattr(sidecar_main, "get_sandbox_pid", lambda: 4242)
     real_create_subprocess_exec = asyncio.create_subprocess_exec
 
     async def _fake_create_subprocess_exec(*cmd, **kwargs):

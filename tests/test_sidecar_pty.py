@@ -203,14 +203,25 @@ def test_pty_closes_shell_on_disconnect(monkeypatch):
 # GitHub issue #130: tmux-backed session persistence across WS reconnects
 # ============================================================================
 
-def test_build_pty_command_wraps_docker_exec_in_tmux_in_compose_mode(monkeypatch, tmp_path):
+def test_build_pty_command_wraps_nsenter_in_tmux_in_compose_mode_too(monkeypatch, tmp_path):
     """GitHub issue #144 fix: tmux must be argv[0], running as the sidecar's
-    own process on the explicit socket path, with the docker-exec entry
-    into the sandbox as tmux's OWN pane command (after `--`) -- the exact
-    inverse of the first (broken) pass, which nsentered/docker-exec'd tmux
-    itself into the sandbox."""
+    own process on the explicit socket path, with the nsenter entry into the
+    sandbox as tmux's OWN pane command (after `--`) -- the exact inverse of
+    the first (broken) pass, which nsentered tmux itself into the sandbox.
+
+    Compose mode used `docker exec` here until deploy/docker-compose.yml
+    started sharing a PID namespace with the sandbox container (`pid:
+    "container:sandbox"`) -- see get_sandbox_pid's docstring. `docker exec`
+    always joined the target container's *existing* network namespace with
+    no way to give it a fresh one per call, which was a real, disclosed
+    compose-only isolation gap (SECURITY.md). Both runtime modes now go
+    through the identical nsenter path, asserted here explicitly rather than
+    just relying on the k8s-mode test below to cover it."""
     monkeypatch.setattr(sidecar_main, "RUNTIME_MODE", "compose")
+    monkeypatch.setattr(sidecar_main, "get_sandbox_pid", lambda: 4242)
     monkeypatch.setattr(sidecar_main, "SANDBOX_UID", 1001)
+    monkeypatch.setattr(sidecar_main, "SANDBOX_GID", 1001)
+    monkeypatch.setattr(sidecar_main, "SANDBOX_EXEC_NETWORK_ISOLATION_ENABLED", False)
     monkeypatch.setattr(sidecar_pty, "_ensure_takeover_tmux_socket_dir", lambda: None)
 
     cmd = sidecar_pty.build_pty_command()
@@ -218,11 +229,13 @@ def test_build_pty_command_wraps_docker_exec_in_tmux_in_compose_mode(monkeypatch
     assert cmd == [
         "tmux", "-f", "/dev/null", "-S", sidecar_pty.TAKEOVER_TMUX_SOCKET,
         "new-session", "-A", "-s", "takeover",
-        "--", "docker", "exec", "-i", "-u", "1001", "sandbox", "/bin/bash",
+        "--", "nsenter", "-t", "4242", "-m", "-p",
+        "--setuid", "1001", "--setgid", "1001",
+        "--", "/bin/bash",
     ]
-    # tmux is the outermost command -- never wrapped by docker exec.
+    # tmux is the outermost command -- never wrapped by nsenter.
     assert cmd[0] == "tmux"
-    assert cmd.index("docker") > cmd.index("tmux")
+    assert cmd.index("nsenter") > cmd.index("tmux")
 
 
 def test_build_pty_command_wraps_nsenter_in_tmux_in_k8s_mode(monkeypatch):
@@ -274,13 +287,23 @@ def test_build_pty_command_wraps_unshare_nsenter_in_tmux_when_network_isolation_
 def test_build_pty_command_exec_argv_path_is_unaffected_by_tmux_wrapping(monkeypatch):
     """/pty-exec passes its own argv explicitly -- it must never be
     wrapped in tmux at all, and must go straight through the plain
-    nsenter/docker-exec entry, same as before issue #130."""
+    nsenter entry, same as before issue #130. Compose mode now goes
+    through the identical nsenter path as k8s mode (see get_sandbox_pid's
+    docstring), so this asserts the nsenter shape rather than the old,
+    now-removed docker-exec fallback."""
     monkeypatch.setattr(sidecar_main, "RUNTIME_MODE", "compose")
+    monkeypatch.setattr(sidecar_main, "get_sandbox_pid", lambda: 4242)
     monkeypatch.setattr(sidecar_main, "SANDBOX_UID", 1001)
+    monkeypatch.setattr(sidecar_main, "SANDBOX_GID", 1001)
+    monkeypatch.setattr(sidecar_main, "SANDBOX_EXEC_NETWORK_ISOLATION_ENABLED", False)
 
     cmd = sidecar_pty.build_pty_command(["echo", "hi"])
 
-    assert cmd == ["docker", "exec", "-i", "-u", "1001", "sandbox", "echo", "hi"]
+    assert cmd == [
+        "nsenter", "-t", "4242", "-m", "-p",
+        "--setuid", "1001", "--setgid", "1001",
+        "--", "echo", "hi",
+    ]
     assert "tmux" not in cmd
 
 

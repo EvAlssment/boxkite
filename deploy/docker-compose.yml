@@ -1,11 +1,19 @@
 # Docker Compose for Local Development
 # Simulates K8s pod with sandbox + sidecar + storage (MinIO/S3 or Azure Blob)
 #
-# Usage:
-#   cd deploy
-#   docker-compose up -d
+# Usage (recommended):
+#   boxkite up
+#     Generates a SIDECAR_AUTH_TOKEN, stores it where `boxkite exec`/`files`
+#     look for it, and runs `docker compose up -d --build` with it injected.
 #
-# Test:
+# Usage (raw docker compose): SIDECAR_AUTH_TOKEN has a `:?` guard below, so a
+# bare `docker compose up` fails on a fresh clone. Export a token first (the
+# same shell must run compose so the value is in its environment):
+#   export SIDECAR_AUTH_TOKEN=$(openssl rand -hex 32)
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# Test (reuse the SIDECAR_AUTH_TOKEN from whichever path above; for `boxkite
+# up` it's in ~/.boxkite/local.env, or just run `boxkite exec "..."`):
 #   curl http://localhost:8080/health
 #   curl -X POST http://localhost:8080/exec \
 #     -H "Content-Type: application/json" \
@@ -79,26 +87,48 @@ services:
     # Compose has no pod securityContext, so keep the local sidecar runtime
     # aligned with K8s while the image itself defaults to non-root for scanning.
     user: "0"
+    # Share the sandbox container's PID namespace, mirroring the real K8s
+    # pod (which shares a PID namespace across containers by nature). This
+    # lets get_sandbox_pid()'s pgrep-based detection work in compose mode
+    # too, so exec can go through the same nsenter + unshare -n path K8s
+    # mode uses instead of `docker exec` -- `docker exec` always joins the
+    # target container's *existing* network namespace with no way to give
+    # it a fresh empty one per call, which was the source of the compose-only
+    # per-exec network-isolation gap (see SECURITY.md). Requires `sandbox`
+    # to already exist, hence depends_on below.
+    pid: "container:sandbox"
+    # Match pod-template.yaml's sidecar securityContext exactly -- nsenter
+    # needs SYS_PTRACE (attach to the sandbox process) and SYS_ADMIN (setns()
+    # for mount/PID namespace entry, plus unshare -n for per-exec network
+    # isolation); CHOWN is needed by /configure; SYS_CHROOT is needed by
+    # nsenter's internal chroot() when entering the mount namespace
+    # (util-linux 2.42+); SETUID/SETGID are needed by nsenter's own
+    # --setuid/--setgid privilege drop to SANDBOX_UID/GID. Compose never
+    # needed these before because it used `docker exec` instead of nsenter --
+    # now that both modes share the same nsenter path, both need the same
+    # capabilities. See pod-template.yaml's securityContext comment for the
+    # residual-risk discussion (same trade-off applies here).
+    cap_add:
+      - SYS_PTRACE
+      - SYS_ADMIN
+      - CHOWN
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
+    cap_drop:
+      - ALL
     ports:
       - "8080:8080"
-    # Mount docker socket for docker exec into sandbox.
-    #
-    # CRITICAL, local-dev-only: this is a full host-root escape primitive.
-    # Anyone with a live connection to this socket can
-    # `docker run --privileged -v /:/host ...` and read/write the HOST
-    # machine's filesystem as root -- verified directly, including that a
-    # docker-socket-proxy does NOT meaningfully close this (its ACL model
-    # gates by API path/verb, not by request body fields like `Privileged`
-    # or `Binds` -- see SECURITY.md's "Known follow-ups" for the full
-    # writeup and how this was tested). The only thing standing between
-    # sandboxed code and this socket is SIDECAR_AUTH_TOKEN gating the
-    # sidecar's own HTTP API -- any future bug there (auth bypass, path
-    # traversal, command injection) escalates straight to host compromise.
-    # This does not exist in the Kubernetes runtime (deploy/pod-template.yaml
-    # has no docker socket at all) -- do not run this compose stack as
-    # anything other than a single-developer local dev environment.
+    # NOTE: this used to bind-mount /var/run/docker.sock so the sidecar
+    # could `docker exec` into the sandbox container -- a full host-root
+    # escape primitive (anyone with a live connection to the socket could
+    # `docker run --privileged -v /:/host ...`), previously disclosed in
+    # SECURITY.md as a CRITICAL, local-dev-only risk. Now that this sidecar
+    # shares the sandbox's PID namespace (`pid: "container:sandbox"` above)
+    # and execs via nsenter instead, the socket is no longer used anywhere
+    # in sidecar/*.py (verified: no docker client/API call sites remain) --
+    # removed outright rather than left mounted-but-unused.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - uploads:/mnt/user-data/uploads
       - outputs:/mnt/user-data/outputs
       - skills:/mnt/skills

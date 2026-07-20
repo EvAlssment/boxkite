@@ -16,10 +16,9 @@ Concretely, the isolation this module is built around:
 1. **A one-shot builder Job, not a live pod.** `KanikoJobBuildRunner` builds
    a Kubernetes `Job` spec (see `deploy/image-builder-job.yaml` for the
    reference manifest kept in parity with this code) running rootless
-   Kaniko — never Docker-in-Docker, never a mounted `docker.sock`. This
-   project's own SECURITY.md documents, as CRITICAL, what a live
-   `docker.sock` connection gives an attacker (full host-root escape via
-   `docker run --privileged -v /:/host`); this module never creates that
+   Kaniko — never Docker-in-Docker, never a mounted `docker.sock`. A live
+   `docker.sock` connection is a full host-root escape primitive
+   (`docker run --privileged -v /:/host`); this module never creates that
    primitive. The Job runs once, to completion or failure, and is deleted
    immediately after — there is no standing builder infrastructure an agent
    or attacker could ever reach mid-build.

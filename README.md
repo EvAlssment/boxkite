@@ -87,8 +87,15 @@ and [`examples/`](examples/) for a runnable version of every framework.
 Everything in this repo — including the `control-plane/` hosted multi-tenant
 API — is something you deploy yourself:
 
-- **Real Kubernetes** — apply `deploy/rbac.yaml`/`network-policy.yaml`/
-  `pod-security-policy.yaml`, or `helm install boxkite deploy/helm/boxkite`.
+- **Real Kubernetes** — two steps. First lay down the cluster prerequisites
+  (RBAC, NetworkPolicy, pod-security admission policy, ServiceAccount,
+  Config/Secret scaffolding) by applying `deploy/rbac.yaml`/
+  `network-policy.yaml`/`pod-security-policy.yaml`, or
+  `helm install boxkite deploy/helm/boxkite`. This chart does **not** deploy
+  the control-plane itself (it has no Deployment/Service) — the per-session
+  sandbox pods are created programmatically by the control-plane at runtime.
+  Then deploy the `control-plane/` API separately (see the Render button
+  below or the [developer docs](https://boxkite-site.vercel.app/developers)).
   A local `kind` cluster works too: `./deploy/local-kind/setup.sh`.
 - **One-click Render deploy** for the control-plane API —
   [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/EvAlssment/boxkite)
@@ -96,12 +103,10 @@ API — is something you deploy yourself:
 - **docker-compose**, for local iteration without a cluster — see the
   Quickstart above.
 
-> **docker-compose mode bind-mounts the host's Docker socket into the
-> sidecar container** so it can `docker exec` into the sandbox — this is a
-> real, disclosed host-root-escape primitive, single-developer local dev
-> only, never production. **The Kubernetes runtime has none of this** (no
-> docker socket, no docker-in-docker). See [SECURITY.md](SECURITY.md) for
-> the full detail.
+> docker-compose mode shares a PID namespace with the sandbox container and
+> execs into it via `nsenter`, the same mechanism the Kubernetes runtime
+> uses — it no longer needs (or mounts) the host's Docker socket. See
+> [SECURITY.md](SECURITY.md) for the current list of disclosed limitations.
 
 Full walkthroughs for every path above (Kubernetes, Helm, Render, the
 `boxkite` CLI's hosted mode, secrets, webhooks, MCP, and every SDK) live on
@@ -118,7 +123,8 @@ One repo, several independently-versioned pieces, kept together deliberately
 | `sidecar/` | The FastAPI service that runs in every sandbox pod — filesystem I/O, command exec via `nsenter`, storage sync. |
 | `control-plane/` | Optional hosted-API layer in front of `SandboxManager` — accounts, API keys, fair-use limits. |
 | `sdk-python/`, `sdk-js/`, `sdk-go/`, `sdk-rust/` | Thin HTTP clients for *your own* running control-plane. |
-| `mcp-server/` (`boxkite-mcp`) | Wraps the Python SDK as an MCP tool source for Claude Code, Claude Desktop, or Cursor. |
+| `mcp-server/` (`boxkite-mcp`) | Wraps the Python SDK as an MCP tool source for Claude Code, Claude Desktop, Codex, or Cursor. |
+| `handoff-cli/` (`boxkite-handoff`) | Moves an in-progress local Claude Code/Codex CLI/opencode session into a fresh sandbox, full conversation history included — see [docs/handoff-adapters.md](docs/handoff-adapters.md). Not yet published. |
 | `bastion/` | Standalone SSH server bridging into a session's human-takeover WebSocket. |
 | `deploy/` | Kubernetes manifests, Helm chart, Dockerfiles, docker-compose, Render Blueprint. |
 | `examples/` | Runnable cookbook — LangGraph, LangChain, raw HTTP, OpenAI/Gemini/Mistral function calling, and more. |

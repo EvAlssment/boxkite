@@ -34,8 +34,8 @@ router = APIRouter()
 # before the interpreter has even started reading stdin.
 _INTERPRETER_READY_SENTINEL = "__BOXKITE_INTERPRETER_READY__"
 
-# Runs inside the sandbox (nsenter'd/docker-exec'd exactly like exec_in_sandbox
-# does for one-shot commands), reading one JSON request per line from stdin
+# Runs inside the sandbox (nsenter'd exactly like exec_in_sandbox does for
+# one-shot commands), reading one JSON request per line from stdin
 # and writing one JSON response per line to stdout. Kept deliberately small:
 # no ipykernel/Jupyter protocol dependency, just enough of a REPL loop to give
 # "stdout + repr of the last expression, against a namespace that persists
@@ -145,8 +145,8 @@ async def _spawn_interpreter() -> "_InterpreterHandle":
     """Start a fresh persistent interpreter process.
 
     Mirrors exec_in_sandbox's exact namespace-entry mechanism (same
-    nsenter/unshare flags in K8s mode, same docker-exec user in compose
-    mode, same SAFE_EXEC_ENV) -- the only difference is the spawned process
+    nsenter/unshare flags, same UID drop, same SAFE_EXEC_ENV, in both
+    runtime modes) -- the only difference is the spawned process
     is a long-lived driver loop reading JSON off stdin instead of a one-shot
     `sh -c <command>`. The memory cap is enforced the same way a one-shot
     exec enforces its output cap: a resource limit on the process itself
@@ -161,20 +161,14 @@ async def _spawn_interpreter() -> "_InterpreterHandle":
     mem_kb = main.INTERPRETER_MAX_MEMORY_MB * 1024
     shell_command = f"ulimit -v {mem_kb}; exec python3 -u {script_path}"
 
-    if main.RUNTIME_MODE == "compose":
-        # SECURITY: -u flag ensures the interpreter runs as the sandbox
-        # user, not root -- see exec_in_sandbox's compose branch for the
-        # matching network-isolation caveat that also applies here.
-        cmd = ["docker", "exec", "-i", "-u", str(main.SANDBOX_UID), "sandbox", "sh", "-c", shell_command]
-    else:
-        sandbox_pid = main.get_sandbox_pid()
-        if not sandbox_pid:
-            try:
-                os.remove(script_path)
-            except OSError:
-                pass
-            raise RuntimeError("Failed to find sandbox process")
-        cmd = main.build_k8s_exec_command(sandbox_pid, shell_command)
+    sandbox_pid = main.get_sandbox_pid()
+    if not sandbox_pid:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+        raise RuntimeError("Failed to find sandbox process")
+    cmd = main.build_k8s_exec_command(sandbox_pid, shell_command)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

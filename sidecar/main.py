@@ -1687,16 +1687,16 @@ _DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 
 
 def _warn_if_docker_socket_mounted() -> None:
-    """Loud, unmissable startup warning if this sidecar can reach the host's
-    Docker socket -- see SECURITY.md's "Known follow-ups" (the CRITICAL,
-    local-dev-only entry) and deploy/docker-compose.yml's own comment block
-    on the same mount. There is no implemented mitigation for this beyond
-    SIDECAR_AUTH_TOKEN gating this sidecar's own HTTP API -- a
-    docker-socket-proxy was tested directly and does not meaningfully close
-    it (its ACL model gates by API path/verb, not by request body fields
-    like `Privileged`/`Binds`). This function only detects and warns; the
-    Kubernetes runtime (deploy/pod-template.yaml) has no docker socket at
-    all and needs no such check.
+    """Regression tripwire, not an expected condition: this sidecar has not
+    needed /var/run/docker.sock since deploy/docker-compose.yml switched
+    compose-mode exec from `docker exec` to nsenter (sharing the sandbox
+    container's PID namespace instead) -- see that file's own comment on
+    why the socket mount was removed outright, and SECURITY.md's history of
+    the CRITICAL host-root-escape risk it used to carry. Neither the
+    Kubernetes runtime (deploy/pod-template.yaml) nor deploy/docker-compose.yml
+    mount this socket anymore, so this warning firing at all means something
+    (a custom deployment, a local override) reintroduced it -- treat it as a
+    bug to fix, not a known/accepted trade-off.
     """
     try:
         socket_exists = stat.S_ISSOCK(os.stat(_DOCKER_SOCKET_PATH).st_mode)
@@ -1713,15 +1713,13 @@ def _warn_if_docker_socket_mounted() -> None:
         "! Anyone with a live connection to this socket can escalate to full",
         "! HOST-ROOT compromise, e.g. `docker run --privileged -v /:/host ...`.",
         "! There is NO implemented mitigation for this beyond SIDECAR_AUTH_TOKEN",
-        "! gating this sidecar's own HTTP API -- see SECURITY.md's 'Known",
-        "! follow-ups' section for the full writeup, including why a",
-        "! docker-socket-proxy does NOT close this.",
+        "! gating this sidecar's own HTTP API.",
         "!",
-        "! This is expected ONLY under deploy/docker-compose.yml's local,",
-        "! single-developer dev mode. NEVER run this configuration",
-        "! multi-tenant, internet-facing, or in production -- use the",
-        "! Kubernetes runtime instead (deploy/pod-template.yaml has no docker",
-        "! socket at all).",
+        "! Neither deploy/pod-template.yaml nor deploy/docker-compose.yml mounts",
+        "! this socket -- this sidecar no longer uses it at all (exec goes",
+        "! through nsenter now, not `docker exec`). Seeing this warning means",
+        "! whatever deployment config started this container reintroduced the",
+        "! mount -- remove it; there is no supported reason to keep it.",
         "!" * 78,
         "",
     ])

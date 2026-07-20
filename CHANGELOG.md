@@ -3,6 +3,33 @@
 All notable changes to boxkite are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are UTC.
 
+## v0.2.1 — 2026-07-20
+
+Post-launch review remediation.
+
+### Added
+- Opt-in automatic retry (exponential backoff + jitter, `Retry-After` aware,
+  idempotent verbs / 429 / 5xx only) across all four SDKs.
+- `sdk-rust` parity: `http_request` secrets-broker proxy, `account`/`usage`,
+  allowed-commands get/set/clear, preview-URL create/revoke, auth methods,
+  LSP tools, and a `with_sandbox` session helper — the crate previously
+  lagged its siblings on these.
+- Typed responses across the JS/TS SDK (replacing `Promise<any>`), plus a
+  `sitemap.ts`/`robots.ts` and favicon for the website.
+
+### Fixed
+- Sandbox pods now set `seccompProfile: RuntimeDefault` on both the sandbox
+  and sidecar containers at runtime (previously only advertised in the
+  reference pod template); guarded by a new parity test.
+- All sandbox/sidecar base images are pinned by digest (`wolfi-base@sha256:…`)
+  instead of the mutable `:latest` tag, for reproducible builds.
+- SDK version lockstep now includes `sdk-rust` (`Cargo.toml`) and `sdk-go`,
+  enforced by `test_version_consistency.py` and the release tooling.
+- Docs accuracy: MCP server README documents all 26 tools (LSP set was
+  omitted); docker-compose header points at the working `boxkite up` path;
+  the Helm section clarifies the chart provisions cluster prerequisites, not
+  a running control-plane; CORS example config shows the correct origin.
+
 ## v0.2.0 — 2026-07-18
 
 ### Added

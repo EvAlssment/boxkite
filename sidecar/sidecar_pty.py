@@ -63,11 +63,11 @@ PTY_SHELL = "/bin/bash"
 # could observe or hijack the operator's own supervisory session.
 #
 # THE FIX: invert the wrapping order. tmux now runs as the SIDECAR's own
-# process (never nsentered/docker-exec'd into the sandbox), on an explicit
-# socket path outside every volume shared with the sandbox container
-# (neither container mounts /run/boxkite -- see deploy/pod-template.yaml's
-# and deploy/docker-compose.yml's volume lists). The nsenter/docker-exec
-# invocation that actually enters the sandbox becomes tmux's OWN pane
+# process (never nsentered into the sandbox), on an explicit socket path
+# outside every volume shared with the sandbox container (neither container
+# mounts /run/boxkite -- see deploy/pod-template.yaml's and
+# deploy/docker-compose.yml's volume lists). The nsenter invocation that
+# actually enters the sandbox becomes tmux's OWN pane
 # command instead of the other way around -- see build_pty_command below.
 # This relies on the sidecar container having its own private, writable
 # container-layer filesystem: it does NOT set readOnlyRootFilesystem (see
@@ -104,13 +104,12 @@ def _ensure_takeover_tmux_socket_dir() -> None:
 def _build_sandbox_entry_argv(
     argv: list[str], *, skip_network_isolation: bool = False
 ) -> Optional[list[str]]:
-    """Build the nsenter (K8s) / docker exec (compose) argv that enters the
-    sandbox container's own mount+PID namespace as the sandbox UID and execs
-    `argv` there. Mirrors exec_in_sandbox/build_k8s_exec_command's
-    namespace-entry mechanism exactly (same nsenter/unshare flags, same
-    docker exec user in compose mode). Returns None when the sandbox
-    process can't be found (K8s mode only), same failure signal
-    exec_in_sandbox uses.
+    """Build the nsenter argv that enters the sandbox container's own
+    mount+PID namespace as the sandbox UID and execs `argv` there. Mirrors
+    exec_in_sandbox/build_k8s_exec_command's namespace-entry mechanism
+    exactly (same nsenter/unshare flags, same UID drop, in both runtime
+    modes). Returns None when the sandbox process can't be found, same
+    failure signal exec_in_sandbox uses.
 
     Shared by both callers of build_pty_command below: `/pty-exec`'s
     one-shot `exec_argv` runs this directly with no PTY-route-specific
@@ -129,13 +128,6 @@ def _build_sandbox_entry_argv(
     which needs the pod's own network path to be reachable at all. Default
     `False` preserves every existing caller/test byte-for-byte.
     """
-    if main.RUNTIME_MODE == "compose":
-        # SECURITY: -u flag ensures the process runs as the sandbox user,
-        # not root -- see the matching comment on exec_in_sandbox's
-        # compose branch for the network-isolation caveat that also
-        # applies here.
-        return ["docker", "exec", "-i", "-u", str(main.SANDBOX_UID), "sandbox", *argv]
-
     sandbox_pid = main.get_sandbox_pid()
     if not sandbox_pid:
         return None
@@ -183,8 +175,8 @@ def build_pty_command(exec_argv: Optional[list[str]] = None) -> Optional[list[st
     # Takeover route: tmux runs as the sidecar's own process, on an
     # explicit socket outside every volume shared with the sandbox
     # container -- see the module-level comment above (GitHub issue #144)
-    # for why. The nsenter/docker-exec entry into the sandbox is tmux's own
-    # pane command (`--` then the entry argv), not the other way around.
+    # for why. The nsenter entry into the sandbox is tmux's own pane
+    # command (`--` then the entry argv), not the other way around.
     entry_argv = _build_sandbox_entry_argv([PTY_SHELL])
     if entry_argv is None:
         return None

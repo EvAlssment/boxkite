@@ -10,7 +10,13 @@
 See README.md for the async client and LangChain tool factory.
 """
 
-from .client import AsyncBoxkiteClient, AsyncSandboxSession, BoxkiteClient, SandboxSession
+from .client import (
+    AsyncBoxkiteClient,
+    AsyncSandboxSession,
+    BoxkiteClient,
+    RetryConfig,
+    SandboxSession,
+)
 from .exceptions import BoxkiteApiError, BoxkiteConnectionError, BoxkiteError
 
 __all__ = [
@@ -20,5 +26,6 @@ __all__ = [
     "BoxkiteClient",
     "BoxkiteConnectionError",
     "BoxkiteError",
+    "RetryConfig",
     "SandboxSession",
 ]

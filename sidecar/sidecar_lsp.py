@@ -265,8 +265,8 @@ async def _spawn_lsp_server(language: str, lsp_id: str) -> "LspServerHandle":
     handshake.
 
     Mirrors _spawn_node_interpreter's exact namespace-entry mechanism (same
-    nsenter/unshare flags in K8s mode, same docker-exec user in compose
-    mode, same SAFE_EXEC_ENV) -- the difference is the spawned process
+    nsenter/unshare flags, same UID drop, same SAFE_EXEC_ENV, in both
+    runtime modes) -- the difference is the spawned process
     speaks real LSP JSON-RPC over stdio rather than a small custom
     newline-JSON driver protocol, so there is no driver script to write to
     disk first; `_LSP_SERVER_COMMANDS[language]` execs the real language
@@ -280,15 +280,10 @@ async def _spawn_lsp_server(language: str, lsp_id: str) -> "LspServerHandle":
     argv = _LSP_SERVER_COMMANDS[language]
     shell_command = "exec " + shlex.join(argv)
 
-    if main.RUNTIME_MODE == "compose":
-        # SECURITY: -u flag ensures the language server runs as the
-        # sandbox user, not root -- see exec_in_sandbox's compose branch.
-        cmd = ["docker", "exec", "-i", "-u", str(main.SANDBOX_UID), "sandbox", "sh", "-c", shell_command]
-    else:
-        sandbox_pid = main.get_sandbox_pid()
-        if not sandbox_pid:
-            raise RuntimeError("Failed to find sandbox process")
-        cmd = main.build_k8s_exec_command(sandbox_pid, shell_command)
+    sandbox_pid = main.get_sandbox_pid()
+    if not sandbox_pid:
+        raise RuntimeError("Failed to find sandbox process")
+    cmd = main.build_k8s_exec_command(sandbox_pid, shell_command)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

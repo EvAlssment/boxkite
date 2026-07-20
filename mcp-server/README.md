@@ -3,8 +3,9 @@
 [![PyPI](https://img.shields.io/pypi/v/boxkite-mcp?label=PyPI)](https://pypi.org/project/boxkite-mcp/)
 
 An MCP server over a hosted boxkite control-plane — lets any MCP-compatible
-client (Claude Code, Claude Desktop, Cursor, etc.) attach a real sandboxed
-code-execution backend as a native tool source, zero custom integration code.
+client (Claude Code, Claude Desktop, Codex, Cursor, etc.) attach a real
+sandboxed code-execution backend as a native tool source, zero custom
+integration code.
 
 > **Prefer no local install?** A control-plane deployment built from this
 > repo also exposes a **remote** Streamable HTTP MCP endpoint directly at
@@ -65,6 +66,13 @@ there is no MCP-proxy transport yet, so this only widens network reachability,
 it doesn't yet let the sandbox speak MCP protocol to the destination) —
 `create_mcp_connection`, `list_mcp_connections`, `delete_mcp_connection`.
 
+Language-server (LSP) tools for code intelligence inside a sandbox — start a
+language server, open a file into it, request completions at a position, then
+stop it — `lsp_start`, `lsp_open`, `lsp_completion`, `lsp_stop`. Like the other
+per-sandbox tools, each takes `session_id`.
+
+That's **26 tools** in total.
+
 ## Security
 
 `exec` runs arbitrary shell commands with no client-side allowlist — the
@@ -72,6 +80,21 @@ isolation boundary is the sandbox itself (see the root repo's `SECURITY.md`),
 not these MCP tools' argument validation. `exec`/`view` results are returned
 to the calling LLM as plain, unsanitized text — treat sandbox output as
 untrusted input, the same as a web-fetch or file-read tool's result.
+
+## Related tools
+
+Moving an in-progress local Claude Code/Codex CLI/opencode session (full
+conversation history) into a fresh boxkite sandbox is **not** something
+this MCP server can do as a tool call: a handoff adapter needs to read
+local, on-disk CLI session state (e.g. Claude Code's
+`~/.claude/projects/...` files) on the *user's own machine*, while an MCP
+tool call runs wherever the MCP client invokes it, and `boxkite-mcp` itself
+is a thin proxy to the hosted control-plane with no access to the calling
+agent's local filesystem. That's handled instead by a separate, local-only
+companion CLI, `boxkite-handoff` — see
+[`../docs/handoff-adapters.md`](../docs/handoff-adapters.md) and
+[`../handoff-cli/README.md`](../handoff-cli/README.md) for how it works.
+Not yet published to PyPI.
 
 ## Development
 

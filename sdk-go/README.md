@@ -136,8 +136,17 @@ func VerifySignature(secret, signatureHeader string, rawBody []byte, tolerance t
 ```
 
 Delete a subscription with `client.DeleteWebhook(ctx, webhook.ID)` when it's
-no longer needed. See `docs/WEBHOOKS-DESIGN.md` for the full event catalog,
-retry/backoff schedule, and delivery-idempotency contract.
+no longer needed. A runnable end-to-end version of this flow (create, list,
+verify a locally-signed payload, delete) lives in
+[`examples/webhooks.go`](examples/webhooks.go):
+
+```sh
+BOXKITE_BASE_URL=https://your-control-plane BOXKITE_API_KEY=bxk_live_... \
+    go run ./examples/webhooks.go
+```
+
+See `docs/WEBHOOKS-DESIGN.md` for the full event catalog, retry/backoff
+schedule, and delivery-idempotency contract.
 
 ## Error handling
 
@@ -156,6 +165,24 @@ if err != nil {
 	return err
 }
 ```
+
+## Retries
+
+Automatic retry is **off by default**. Enable it with `WithRetry`, starting
+from `DefaultRetryConfig()` (2 retries, exponential backoff with full
+jitter, `Retry-After` honored):
+
+```go
+client, err := boxkite.NewClient(baseURL, apiKey, boxkite.WithRetry(boxkite.DefaultRetryConfig()))
+```
+
+Only idempotent verbs (`GET`/`HEAD`/`PUT`/`DELETE`/`OPTIONS`) are retried,
+and only on a connection failure or a transient status (429, 500, 502, 503,
+504) — a non-idempotent `POST` (create-sandbox/secret/webhook) is never
+retried, so this can't double-create a resource. Backoff waits honor the
+request's `context.Context`: a cancelled/expired `ctx` cuts the wait short
+and returns immediately. Every field of `RetryConfig` is tunable if the
+defaults don't fit.
 
 ## Streaming: `Watch` and `Takeover`
 
@@ -229,9 +256,10 @@ WebSocket upgrade request.
   used consistently across the whole client (`CreateSandboxRequest`,
   `CreateImageRequest`, `ExecOptions`, `GrepOptions`, etc.) — the
   functional-options pattern is reserved for `Client` construction itself
-  (`WithHTTPClient`, `WithTimeout`, `WithWebSocketDialer`), where there are
-  few, rarely-combined options and the pattern's real strength (extensible
-  construction without breaking existing call sites) applies.
+  (`WithHTTPClient`, `WithTimeout`, `WithWebSocketDialer`, `WithRetry`),
+  where there are few, rarely-combined options and the pattern's real
+  strength (extensible construction without breaking existing call sites)
+  applies.
 
 ## Explicitly out of scope for this pass
 
@@ -274,6 +302,16 @@ Tests fake the control-plane with `net/http/httptest` (mirroring how
 `sdk-python`'s tests use `httpx.MockTransport` and `sdk-js`'s use a fake
 `fetch`) — no real deployment needed. WebSocket (`Takeover`) tests spin up
 a real `gorilla/websocket` upgrader against an `httptest.Server`.
+
+## Related tools
+
+Moving an in-progress local Claude Code/Codex CLI/opencode session (full
+conversation history, not just a diff) into a fresh boxkite sandbox is
+handled by the separate `boxkite-handoff` CLI (Python, built on
+`sdk-python`, not this SDK) — see
+[`../docs/handoff-adapters.md`](../docs/handoff-adapters.md) and
+[`../handoff-cli/README.md`](../handoff-cli/README.md). Not yet published
+to PyPI.
 
 See the [root README](https://github.com/EvAlssment/boxkite#readme) for
 what boxkite is and the full self-hosting story, and

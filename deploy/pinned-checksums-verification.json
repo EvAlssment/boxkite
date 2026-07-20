@@ -1,5 +1,25 @@
 {
   "_comment": "Record of the last independent cross-check of deploy/sandbox.Dockerfile's pinned pandoc / Chrome-for-Testing sha256 digests. Regenerate by bumping PANDOC_VERSION/CHROME_FOR_TESTING_VERSION in the Dockerfile, then re-running scripts/verify-pinned-checksums.sh and pasting its output into this file. tests/test_pinned_checksum_verification.py asserts this file's versions and hashes stay in lockstep with deploy/sandbox.Dockerfile, so a version bump without an updated record fails CI instead of silently going unverified. See SECURITY.md ('Known follow-ups') for the full writeup.",
+  "wolfi_base_image": {
+    "reference": "cgr.dev/chainguard/wolfi-base:latest",
+    "pinned_digest": "sha256:02dab76bd852a70556b5b2002195c8a5fdab77d323c433bf6642aab080489795",
+    "verified_at": "2026-07-20",
+    "method": "OCI image-index digest resolved from cgr.dev's registry v2 API (Docker-Content-Digest header, Accept: application/vnd.oci.image.index.v1+json), cross-checked by re-fetching the raw index manifest body and computing its sha256 locally -- both produced the same digest. This is a floating tag (:latest is mutable and non-reproducible), so every `FROM cgr.dev/chainguard/wolfi-base:latest` across deploy/*.Dockerfile is pinned to `:latest@<digest>` to make base-image builds reproducible.",
+    "source_query": "curl -sSI -H 'Accept: application/vnd.oci.image.index.v1+json' https://cgr.dev/v2/chainguard/wolfi-base/manifests/latest | grep -i docker-content-digest",
+    "note": "Chainguard rebuilds wolfi-base frequently; re-resolve and re-pin this digest (and update this record's verified_at) when intentionally moving to a newer base. Pinning all Dockerfiles to one shared digest keeps them building the same base until that deliberate bump.",
+    "pinned_files": [
+      "deploy/sandbox.Dockerfile",
+      "deploy/sidecar.Dockerfile",
+      "deploy/sandbox-minimal.Dockerfile",
+      "deploy/sandbox-node.Dockerfile",
+      "deploy/sandbox-go.Dockerfile",
+      "deploy/sandbox-lsp.Dockerfile",
+      "deploy/sandbox-rust.Dockerfile",
+      "deploy/sandbox-nextjs.Dockerfile",
+      "deploy/sandbox-claude-code.Dockerfile",
+      "deploy/sandbox-desktop.Dockerfile"
+    ]
+  },
   "pandoc": {
     "version": "3.9.0.2",
     "verified_at": "2026-07-12",

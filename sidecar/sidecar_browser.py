@@ -226,18 +226,17 @@ async def _kill_browser_handle(handle: "_BrowserHandle") -> None:
 async def _spawn_browser() -> "_BrowserHandle":
     """Start a fresh browser-driver subprocess.
 
-    SECURITY (docs/BROWSER-EXEC-DESIGN.md §3.1): in K8s mode, this is the
-    ONLY sidecar-launched subprocess that opts out of the per-exec empty
-    network namespace (`skip_network_isolation=True`) -- a real Chromium
-    process must resolve DNS and open outbound HTTPS connections itself, to
-    hosts nobody enumerated in advance. This does NOT widen the pod's own
+    SECURITY (docs/BROWSER-EXEC-DESIGN.md §3.1): this is the ONLY
+    sidecar-launched subprocess that opts out of the per-exec empty network
+    namespace (`skip_network_isolation=True`) -- a real Chromium process
+    must resolve DNS and open outbound HTTPS connections itself, to hosts
+    nobody enumerated in advance. This does NOT widen the pod's own
     NetworkPolicy egress/ingress posture; it only lets THIS one process
     share the pod's own existing network namespace instead of getting a
     fresh, empty one. See src/boxkite/browser_network_policy.py for the
-    NetworkPolicy this then requires. Compose mode needs no equivalent flag
-    -- see exec_in_sandbox's own compose-mode comment: there is no per-exec
-    namespace isolation to opt out of there in the first place, the sidecar
-    and sandbox containers already share a Docker network.
+    NetworkPolicy this then requires. Applies identically in both runtime
+    modes now (see get_sandbox_pid's docstring for why compose mode reuses
+    the same nsenter path as K8s).
     """
     os.makedirs(main.TMP_DIR, exist_ok=True)
     script_path = os.path.join(main.TMP_DIR, f".boxkite-browser-{uuid4().hex}.js")
@@ -247,20 +246,14 @@ async def _spawn_browser() -> "_BrowserHandle":
 
     shell_command = f"exec node {script_path}"
 
-    if main.RUNTIME_MODE == "compose":
-        # SECURITY: -u flag ensures the driver runs as the sandbox user, not
-        # root -- see exec_in_sandbox's compose branch for the matching
-        # network-isolation caveat that also applies here.
-        cmd = ["docker", "exec", "-i", "-u", str(main.SANDBOX_UID), "sandbox", "sh", "-c", shell_command]
-    else:
-        sandbox_pid = main.get_sandbox_pid()
-        if not sandbox_pid:
-            try:
-                os.remove(script_path)
-            except OSError:
-                pass
-            raise RuntimeError("Failed to find sandbox process")
-        cmd = main.build_k8s_exec_command(sandbox_pid, shell_command, skip_network_isolation=True)
+    sandbox_pid = main.get_sandbox_pid()
+    if not sandbox_pid:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+        raise RuntimeError("Failed to find sandbox process")
+    cmd = main.build_k8s_exec_command(sandbox_pid, shell_command, skip_network_isolation=True)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

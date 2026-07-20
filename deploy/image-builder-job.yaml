@@ -13,9 +13,9 @@
 #   against a possibly-different package resolution the caller never saw.
 # - Rootless Kaniko (`gcr.io/kaniko-project/executor`), NOT
 #   Docker-in-Docker and NOT a privileged builder with a mounted
-#   `docker.sock` -- SECURITY.md documents, as CRITICAL, exactly what a
-#   live docker.sock connection gives an attacker (full host-root escape).
-#   This Job never creates that primitive.
+#   `docker.sock` -- a live docker.sock connection is a full host-root
+#   escape primitive (`docker run --privileged -v /:/host ...`). This Job
+#   never creates that primitive.
 # - The Kaniko image is digest-pinned, not a mutable tag -- same discipline
 #   SECURITY.md documents for the pandoc/Chrome-for-Testing downloads, and
 #   the same discipline this feature enforces on its own produced images

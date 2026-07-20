@@ -9,15 +9,14 @@
 # precedent). It deliberately does NOT translate deploy/docker-compose.yml's
 # sandbox+sidecar+MinIO stack into this Blueprint:
 #
-#   - docker-compose.yml's sidecar container bind-mounts the host's
-#     /var/run/docker.sock to `docker exec` into the sandbox container.
-#     SECURITY.md documents this as a full host-root-escape primitive, and
-#     docker-compose.yml's own inline comment says outright "do not run
+#   - docker-compose.yml's sidecar container shares a PID namespace with the
+#     sandbox container and execs into it via nsenter -- Render's container
+#     platform has no equivalent of Compose's `pid: "container:X"` or the
+#     SYS_ADMIN/SYS_PTRACE capability grants that requires, so that stack
+#     would not run here even setting aside the next point.
+#   - docker-compose.yml's own inline comment says outright "do not run
 #     this compose stack as anything other than a single-developer local
-#     dev environment."
-#   - Render's container platform does not expose a host Docker socket to
-#     services at all -- so beyond being unsafe to ship as a public
-#     one-click button, that stack would not even run here.
+#     dev environment" -- it's a dev convenience, not a deployment target.
 #
 # Real sandbox execution needs an actual Kubernetes cluster (self-hosted,
 # or a managed one -- GKE/EKS/AKS/a kind cluster on a box you control) that
@@ -85,7 +84,8 @@ services:
         generateValue: true
       # No browser client origins allowed by default -- set this to your
       # actual frontend's origin(s) if you're pointing a browser-based
-      # client at this deployment.
+      # client at this deployment, e.g.
+      # "https://boxkite-site.vercel.app,http://localhost:3000".
       - key: CORS_ALLOWED_ORIGINS_RAW
         value: ""
       - key: RUNTIME_MODE

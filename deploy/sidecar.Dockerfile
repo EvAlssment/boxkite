@@ -7,7 +7,7 @@
 ARG PYTHON_VERSION=3.11
 ARG UV_VERSION=0.11.2
 
-FROM cgr.dev/chainguard/wolfi-base:latest AS python-base
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:02dab76bd852a70556b5b2002195c8a5fdab77d323c433bf6642aab080489795 AS python-base
 ARG PYTHON_VERSION
 
 RUN apk update && apk add --no-cache \

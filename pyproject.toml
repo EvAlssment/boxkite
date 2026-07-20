@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 # as before. Same split as `beautifulsoup4` (dist name) vs `bs4` (import
 # name) — pip installs "boxkite-sandbox", code imports "boxkite".
 name = "boxkite-sandbox"
-version = "0.2.0"
+version = "0.2.1"
 description = "A self-hostable, Kubernetes-native sandbox for agent code execution — pod-per-session isolation plus a complete bash/python/file tool surface."
 # PYPI_README.md is a short, PyPI-page-specific readme -- deliberately
 # distinct from README.md (the repo's GitHub front door, which stays full
@@ -43,6 +43,9 @@ dependencies = [
     # deployments, but this package uses it directly now, so it's pinned
     # here explicitly rather than relying on that transitive path.
     "cryptography>=42",
+    # `boxkite mcp init codex` writes ~/.codex/config.toml -- reading is
+    # stdlib tomllib (3.11+), but tomllib has no writer, hence tomli-w.
+    "tomli-w>=1.0,<2",
 ]
 
 [project.urls]

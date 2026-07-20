@@ -76,11 +76,24 @@ match client.exec(&sandbox.id, "echo hi", Default::default()).await {
 
 ## Scope
 
-This crate wraps a subset of the `/v1/*` API that `sdk-python`/`sdk-js` also
+This crate wraps the same `/v1/*` API surface `sdk-python`/`sdk-js`/`sdk-go`
 wrap: sandbox lifecycle (`create_sandbox`/`get_sandbox`/`list_sandboxes`/
-`destroy_sandbox`), exec/file operations, background process management, the
-audit log, human takeover, desktop takeover, and CRUD for
-images/volumes/outbound-MCP connections/webhooks/secrets.
+`destroy_sandbox`), exec/file operations, the `http_request` secrets-broker
+proxy, background process management, the audit log, human takeover, desktop
+takeover, network-ingress preview URLs (`create_preview_url`/
+`revoke_preview_url`), agent-invokable LSP completions (`lsp_start`/`lsp_open`/
+`lsp_completion`/`lsp_stop`), account/usage introspection (`account`/`usage`),
+dashboard auth-flow helpers (`request_password_reset`/`confirm_password_reset`/
+`verify_email`/`resend_verification`/`refresh_token`/`logout`), the per-account
+command allowlist (`get_allowed_commands`/`set_allowed_commands`/
+`clear_allowed_commands`), the `SandboxSession`/`with_sandbox` convenience
+helper, and CRUD for images/volumes/outbound-MCP connections/webhooks/secrets.
+
+Automatic retry with exponential backoff + jitter (honoring `Retry-After`) is
+**opt-in** via `Client::builder().max_retries(n)` or `.retry(RetryConfig {..})`
+— off by default. Only `429` (any method) and `5xx`/transport errors on
+idempotent methods (`GET`/`PUT`/`DELETE`/…) are retried; a bare `POST` is never
+retried on a `5xx`, since it may have already applied server-side.
 
 **Deliberately not included in this pass:**
 
@@ -98,17 +111,6 @@ images/volumes/outbound-MCP connections/webhooks/secrets.
   it exists on the control-plane: filesystem snapshots (`/snapshots/*`).
   This crate mirrors its two reference SDKs' actual method sets rather
   than inventing new surface area ahead of them.
-- **Account/usage introspection, auth-flow helpers, the `http_request`
-  secrets-broker proxy, network-ingress preview URLs, and the per-account
-  command allowlist.** Unlike the item above, this one is **not** a shared
-  gap across all three SDKs — `sdk-python`/`sdk-js` already wrap all of it
-  (`account()`/`usage()`; `request_password_reset`/`confirm_password_reset`/
-  `verify_email`/`refresh_token`/`logout`; `http_request()`;
-  `create_preview_url()`/`revoke_preview_url()`; `get_allowed_commands()`/
-  `set_allowed_commands()`/`clear_allowed_commands()`). This crate genuinely
-  lags its two reference SDKs here and doesn't implement any of it yet —
-  left for a follow-up pass, not a deliberate design choice like the items
-  above.
 - **`Webhook`'s newer `payload_format`/`hec_token` fields** (added to
   `control_plane.schemas.WebhookCreateRequest` for the Splunk HEC/audit-log
   export addendum, issue #125) — `sdk-python`/`sdk-js` haven't picked these
@@ -129,6 +131,16 @@ real local HTTP server, not an in-process shim) — no real deployment needed.
 `takeover()`'s test spins up a bare `tokio` TCP listener and does the
 WebSocket handshake by hand with `tokio-tungstenite`'s server-side helpers,
 since `wiremock` is HTTP-only.
+
+## Related tools
+
+Moving an in-progress local Claude Code/Codex CLI/opencode session (full
+conversation history, not just a diff) into a fresh boxkite sandbox is
+handled by the separate `boxkite-handoff` CLI (Python, built on
+`sdk-python`, not this crate) — see
+[`../docs/handoff-adapters.md`](../docs/handoff-adapters.md) and
+[`../handoff-cli/README.md`](../handoff-cli/README.md). Not yet published
+to PyPI.
 
 See the [root README](https://github.com/EvAlssment/boxkite#readme) for
 what boxkite is and the full self-hosting story.

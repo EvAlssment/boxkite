@@ -13,6 +13,47 @@
  */
 
 import { BoxkiteApiError, BoxkiteConnectionError } from "./errors.js";
+import {
+  computeBackoffMs,
+  isIdempotentMethod,
+  isRetriableStatus,
+  parseRetryAfter,
+  resolveRetryOptions,
+  sleep,
+  type ResolvedRetryOptions,
+  type RetryOptions,
+} from "./retry.js";
+import type {
+  Account,
+  AllowedCommandsResponse,
+  ExecResult,
+  FileCreateResult,
+  FileViewResult,
+  GetLogResult,
+  GlobResult,
+  GrepResult,
+  HttpRequestResult,
+  Image,
+  LogEntry,
+  LsResult,
+  McpConnection,
+  MessageResponse,
+  PreviewRevokeResult,
+  PreviewUrl,
+  ProcessInputResult,
+  ProcessListResult,
+  ProcessOutputResult,
+  ProcessStartResult,
+  ProcessStopResult,
+  Sandbox,
+  Secret,
+  StrReplaceResult,
+  TokenPair,
+  Usage,
+  Volume,
+  Webhook,
+  WebhookDelivery,
+} from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const EXEC_TIMEOUT_HEADROOM_MS = 15_000;
@@ -64,6 +105,13 @@ export interface BoxkiteClientOptions {
    * one only for testing (a fake implementation) or an unusual runtime.
    */
   wsImpl?: typeof WebSocket;
+  /**
+   * Opt-in automatic retry with exponential backoff + jitter for
+   * transiently-failing idempotent requests (connection errors, HTTP 429,
+   * and 5xx). Omit for no retries (unchanged behavior); pass `{}` for
+   * sensible defaults, or override individual knobs. See RetryOptions.
+   */
+  retry?: RetryOptions;
 }
 
 export interface ExecOptions {
@@ -295,6 +343,7 @@ export class BoxkiteClient {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly wsImpl: typeof WebSocket;
+  private readonly retry: ResolvedRetryOptions;
 
   constructor(options: BoxkiteClientOptions) {
     validateBaseUrlScheme(options.baseUrl);
@@ -303,6 +352,7 @@ export class BoxkiteClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.wsImpl = options.wsImpl ?? WebSocket;
+    this.retry = resolveRetryOptions(options.retry);
   }
 
   private async request(
@@ -319,29 +369,53 @@ export class BoxkiteClient {
       if (qs) url += `?${qs}`;
     }
 
-    let resp: Response;
-    try {
-      resp = await this.fetchImpl(url, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-          ...headersOverride,
-        },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
-      });
-    } catch (err) {
-      throw new BoxkiteConnectionError(err instanceof Error ? err.message : String(err));
-    }
+    const canRetry = this.retry.maxRetries > 0 && isIdempotentMethod(method);
+    let attempt = 0;
+    for (;;) {
+      let resp: Response;
+      try {
+        resp = await this.fetchImpl(url, {
+          method,
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+            ...headersOverride,
+          },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
+        });
+      } catch (err) {
+        if (canRetry && attempt < this.retry.maxRetries) {
+          await sleep(computeBackoffMs(attempt, this.retry));
+          attempt++;
+          continue;
+        }
+        throw new BoxkiteConnectionError(err instanceof Error ? err.message : String(err));
+      }
 
-    if (!resp.ok) {
-      const { code, message } = await parseErrorBody(resp);
-      throw new BoxkiteApiError(resp.status, code, message);
-    }
+      if (!resp.ok) {
+        if (canRetry && attempt < this.retry.maxRetries && isRetriableStatus(resp.status)) {
+          await sleep(this.retryDelayMs(resp, attempt));
+          attempt++;
+          continue;
+        }
+        const { code, message } = await parseErrorBody(resp);
+        throw new BoxkiteApiError(resp.status, code, message);
+      }
 
-    const text = await resp.text();
-    return text ? JSON.parse(text) : null;
+      const text = await resp.text();
+      return text ? JSON.parse(text) : null;
+    }
+  }
+
+  /** Wait before the next retry: a server `Retry-After` header wins when
+   * present and honored (capped at maxDelayMs), else computed backoff. */
+  private retryDelayMs(resp: Response, attempt: number): number {
+    if (this.retry.respectRetryAfter) {
+      const retryAfter = parseRetryAfter(resp.headers.get("retry-after"));
+      if (retryAfter !== null) return Math.min(retryAfter, this.retry.maxDelayMs);
+    }
+    return computeBackoffMs(attempt, this.retry);
   }
 
   /** GET /v1/account -- identity for the API key in use. */
@@ -368,7 +442,7 @@ export class BoxkiteClient {
    * stubbed server-side unless the deployment has wired up a real
    * EmailSender (see control-plane/src/control_plane/email_sender.py).
    */
-  requestPasswordReset(email: string): Promise<{ message: string }> {
+  requestPasswordReset(email: string): Promise<MessageResponse> {
     return this.request("POST", "/v1/auth/password-reset/request", { email });
   }
 
@@ -380,7 +454,7 @@ export class BoxkiteClient {
    * "invalid_or_expired_token") for an unknown, already-used, or expired
    * token.
    */
-  confirmPasswordReset(token: string, newPassword: string): Promise<{ message: string }> {
+  confirmPasswordReset(token: string, newPassword: string): Promise<MessageResponse> {
     return this.request("POST", "/v1/auth/password-reset/confirm", {
       token,
       new_password: newPassword,
@@ -395,7 +469,7 @@ export class BoxkiteClient {
    * "invalid_or_expired_token") for an unknown, already-used, or expired
    * token.
    */
-  verifyEmail(token: string): Promise<{ message: string }> {
+  verifyEmail(token: string): Promise<MessageResponse> {
     return this.request("POST", "/v1/auth/verify-email", { token });
   }
 
@@ -409,7 +483,7 @@ export class BoxkiteClient {
    * explicitly here and overrides this call's Authorization header rather
    * than using this.apiKey.
    */
-  resendVerification(accessToken: string): Promise<{ message: string }> {
+  resendVerification(accessToken: string): Promise<MessageResponse> {
     return this.request("POST", "/v1/auth/resend-verification", undefined, undefined, undefined, {
       Authorization: `Bearer ${accessToken}`,
     });
@@ -426,7 +500,7 @@ export class BoxkiteClient {
    * (which also revokes every other refresh token on the account as a
    * precaution).
    */
-  refreshToken(refreshToken: string): Promise<any> {
+  refreshToken(refreshToken: string): Promise<TokenPair> {
     return this.request("POST", "/v1/auth/refresh", { refresh_token: refreshToken });
   }
 
@@ -449,6 +523,9 @@ export class BoxkiteClient {
    * @param options.lifetimeMinutes Maximum lifetime of the sandbox, in minutes,
    *   before it is automatically destroyed.
    * @param options.count Number of sandboxes to create in this request.
+   *   When greater than 1 the control plane returns an array of sandboxes
+   *   rather than a single object; the return type here reflects the common
+   *   single-sandbox case, so cast the result when using count > 1.
    * @param options.secretNames Names of this account's secrets (see
    *   POST /v1/secrets) this session should be granted access to via the
    *   sidecar's secrets-broker httpRequest tool (docs/SECRETS-DESIGN.md). A
@@ -486,7 +563,7 @@ export class BoxkiteClient {
     mcpConnectionNames?: string[];
     volumeMounts?: Record<string, string>;
     gpuCount?: number;
-  }): Promise<any> {
+  }): Promise<Sandbox> {
     const body: Record<string, unknown> = {};
     if (options?.label !== undefined) body.label = options.label;
     if (options?.size !== undefined) body.size = options.size;
@@ -501,11 +578,11 @@ export class BoxkiteClient {
     return this.request("POST", "/v1/sandboxes", body);
   }
 
-  getSandbox(sessionId: string): Promise<any> {
+  getSandbox(sessionId: string): Promise<Sandbox> {
     return this.request("GET", `/v1/sandboxes/${sessionId}`);
   }
 
-  async listSandboxes(options?: { activeOnly?: boolean }): Promise<any[]> {
+  async listSandboxes(options?: { activeOnly?: boolean }): Promise<Sandbox[]> {
     const result = await this.request("GET", "/v1/sandboxes", undefined, {
       active_only: String(Boolean(options?.activeOnly)),
     });
@@ -516,7 +593,7 @@ export class BoxkiteClient {
     await this.request("DELETE", `/v1/sandboxes/${sessionId}`);
   }
 
-  exec(sessionId: string, command: string, options?: ExecOptions): Promise<any> {
+  exec(sessionId: string, command: string, options?: ExecOptions): Promise<ExecResult> {
     const body: Record<string, unknown> = { command };
     if (options?.timeout !== undefined) body.timeout = options.timeout;
     if (options?.description !== undefined) body.description = options.description;
@@ -537,7 +614,7 @@ export class BoxkiteClient {
     method: string,
     url: string,
     options?: { headers?: Record<string, string>; body?: string; timeout?: number },
-  ): Promise<any> {
+  ): Promise<HttpRequestResult> {
     const body: Record<string, unknown> = { method, url };
     if (options?.headers !== undefined) body.headers = options.headers;
     if (options?.body !== undefined) body.body = options.body;
@@ -547,13 +624,18 @@ export class BoxkiteClient {
     return this.request("POST", `/v1/sandboxes/${sessionId}/http-request`, body, undefined, timeoutMs);
   }
 
-  fileCreate(sessionId: string, path: string, content: string, options?: FileOptions): Promise<any> {
+  fileCreate(
+    sessionId: string,
+    path: string,
+    content: string,
+    options?: FileOptions,
+  ): Promise<FileCreateResult> {
     const body: Record<string, unknown> = { path, content };
     if (options?.description !== undefined) body.description = options.description;
     return this.request("POST", `/v1/sandboxes/${sessionId}/files`, body);
   }
 
-  view(sessionId: string, path: string, options?: ViewOptions): Promise<any> {
+  view(sessionId: string, path: string, options?: ViewOptions): Promise<FileViewResult> {
     const body: Record<string, unknown> = { path };
     if (options?.viewRange !== undefined) body.view_range = options.viewRange;
     if (options?.description !== undefined) body.description = options.description;
@@ -566,7 +648,7 @@ export class BoxkiteClient {
     oldStr: string,
     newStr: string,
     options?: StrReplaceOptions,
-  ): Promise<any> {
+  ): Promise<StrReplaceResult> {
     const body: Record<string, unknown> = {
       path,
       old_str: oldStr,
@@ -578,7 +660,7 @@ export class BoxkiteClient {
   }
 
   /** POST /v1/sandboxes/{sessionId}/files/ls -- list direct children of a directory. */
-  ls(sessionId: string, options?: LsOptions): Promise<any> {
+  ls(sessionId: string, options?: LsOptions): Promise<LsResult> {
     const body: Record<string, unknown> = {};
     if (options?.path !== undefined) body.path = options.path;
     if (options?.description !== undefined) body.description = options.description;
@@ -586,7 +668,7 @@ export class BoxkiteClient {
   }
 
   /** POST /v1/sandboxes/{sessionId}/files/glob -- find files by name pattern. */
-  glob(sessionId: string, pattern: string, options?: GlobOptions): Promise<any> {
+  glob(sessionId: string, pattern: string, options?: GlobOptions): Promise<GlobResult> {
     const body: Record<string, unknown> = { pattern };
     if (options?.path !== undefined) body.path = options.path;
     if (options?.description !== undefined) body.description = options.description;
@@ -594,7 +676,7 @@ export class BoxkiteClient {
   }
 
   /** POST /v1/sandboxes/{sessionId}/files/grep -- search file contents by regex. */
-  grep(sessionId: string, pattern: string, options?: GrepOptions): Promise<any> {
+  grep(sessionId: string, pattern: string, options?: GrepOptions): Promise<GrepResult> {
     const body: Record<string, unknown> = { pattern };
     if (options?.path !== undefined) body.path = options.path;
     if (options?.glob !== undefined) body.glob = options.glob;
@@ -605,7 +687,7 @@ export class BoxkiteClient {
 
   /** GET /v1/sandboxes/{sessionId}/log -- paginated exec/file-op audit
    * history (`docs/SANDBOX-OBSERVABILITY-DESIGN.md` section 3). */
-  getLog(sessionId: string, options?: GetLogOptions): Promise<any> {
+  getLog(sessionId: string, options?: GetLogOptions): Promise<GetLogResult> {
     const params: Record<string, string> = {};
     if (options?.limit !== undefined) params.limit = String(options.limit);
     if (options?.offset !== undefined) params.offset = String(options.offset);
@@ -622,7 +704,11 @@ export class BoxkiteClient {
    * `getProcessOutput`, feed it input with `sendProcessInput`, and stop it
    * with `stopProcess`. See `docs/PROCESS-SESSIONS-DESIGN.md`.
    */
-  startProcess(sessionId: string, command: string, options?: StartProcessOptions): Promise<any> {
+  startProcess(
+    sessionId: string,
+    command: string,
+    options?: StartProcessOptions,
+  ): Promise<ProcessStartResult> {
     const body: Record<string, unknown> = {
       command,
       max_runtime_seconds: options?.maxRuntimeSeconds ?? 3600,
@@ -633,7 +719,7 @@ export class BoxkiteClient {
 
   /** GET /v1/sandboxes/{sessionId}/processes -- every background process
    * currently tracked for this session. */
-  listProcesses(sessionId: string): Promise<any> {
+  listProcesses(sessionId: string): Promise<ProcessListResult> {
     return this.request("GET", `/v1/sandboxes/${sessionId}/processes`);
   }
 
@@ -642,21 +728,25 @@ export class BoxkiteClient {
    * background process's output since a given byte offset. Polling-style,
    * not streaming.
    */
-  getProcessOutput(sessionId: string, processId: string, options?: GetProcessOutputOptions): Promise<any> {
+  getProcessOutput(
+    sessionId: string,
+    processId: string,
+    options?: GetProcessOutputOptions,
+  ): Promise<ProcessOutputResult> {
     const params: Record<string, string> = { since_offset: String(options?.sinceOffset ?? 0) };
     return this.request("GET", `/v1/sandboxes/${sessionId}/processes/${processId}/output`, undefined, params);
   }
 
   /** POST /v1/sandboxes/{sessionId}/processes/{processId}/input -- write to
    * a tracked background process's stdin pipe. */
-  sendProcessInput(sessionId: string, processId: string, data: string): Promise<any> {
+  sendProcessInput(sessionId: string, processId: string, data: string): Promise<ProcessInputResult> {
     return this.request("POST", `/v1/sandboxes/${sessionId}/processes/${processId}/input`, { data });
   }
 
   /** POST /v1/sandboxes/{sessionId}/processes/{processId}/stop -- stop a
    * tracked background process (SIGTERM, then SIGKILL if it doesn't exit
    * within a short grace period). */
-  stopProcess(sessionId: string, processId: string): Promise<any> {
+  stopProcess(sessionId: string, processId: string): Promise<ProcessStopResult> {
     return this.request("POST", `/v1/sandboxes/${sessionId}/processes/${processId}/stop`);
   }
 
@@ -671,7 +761,7 @@ export class BoxkiteClient {
    * the connection alive; `break`ing out of a `for await` loop over it (or
    * calling `.return()`) closes the underlying stream.
    */
-  async *watch(sessionId: string): AsyncGenerator<any> {
+  async *watch(sessionId: string): AsyncGenerator<LogEntry> {
     let resp: Response;
     try {
       resp = await this.fetchImpl(`${this.baseUrl}/v1/sandboxes/${sessionId}/watch`, {
@@ -837,7 +927,11 @@ export class BoxkiteClient {
    * without tearing down the session or affecting any other preview token
    * minted for the same session/port.
    */
-  createPreviewUrl(sessionId: string, port: number, options?: CreatePreviewUrlOptions): Promise<any> {
+  createPreviewUrl(
+    sessionId: string,
+    port: number,
+    options?: CreatePreviewUrlOptions,
+  ): Promise<PreviewUrl> {
     const body: Record<string, unknown> = {};
     if (options?.ttlSeconds !== undefined) body.ttl_seconds = options.ttlSeconds;
     return this.request("POST", `/v1/sandboxes/${sessionId}/preview/${port}`, body);
@@ -855,7 +949,7 @@ export class BoxkiteClient {
    * than throwing -- the caller cannot distinguish "this token never
    * existed" from "someone already revoked it".
    */
-  revokePreviewUrl(sessionId: string, port: number, tokenId: string): Promise<any> {
+  revokePreviewUrl(sessionId: string, port: number, tokenId: string): Promise<PreviewRevokeResult> {
     return this.request("POST", `/v1/sandboxes/${sessionId}/preview/${port}/revoke`, { token_id: tokenId });
   }
 
@@ -869,7 +963,7 @@ export class BoxkiteClient {
    * allowlist is configured (all commands permitted, subject to the sandbox's
    * own constraints).
    */
-  getAllowedCommands(): Promise<{ rules: AllowedCommandRule[] }> {
+  getAllowedCommands(): Promise<AllowedCommandsResponse> {
     return this.request("GET", "/v1/account/allowed-commands");
   }
 
@@ -883,7 +977,7 @@ export class BoxkiteClient {
    *   that command. This is an opt-in guardrail, not a sandbox-escape
    *   boundary -- see SECURITY.md.
    */
-  setAllowedCommands(rules: AllowedCommandRule[]): Promise<{ rules: AllowedCommandRule[] }> {
+  setAllowedCommands(rules: AllowedCommandRule[]): Promise<AllowedCommandsResponse> {
     return this.request("PUT", "/v1/account/allowed-commands", { rules });
   }
 
@@ -917,7 +1011,7 @@ export class BoxkiteClient {
    * @param options.npmPackages Exact-version-pinned npm packages
    *   (`name==version` or `@scope/name==version`, no ranges).
    */
-  createImage(options?: CreateImageOptions): Promise<any> {
+  createImage(options?: CreateImageOptions): Promise<Image> {
     const body: Record<string, unknown> = {};
     if (options?.label !== undefined) body.label = options.label;
     if (options?.base !== undefined) body.base = options.base;
@@ -929,12 +1023,12 @@ export class BoxkiteClient {
 
   /** GET /v1/images/{imageId} -- a custom sandbox image's build status and
    * details. */
-  getImage(imageId: string): Promise<any> {
+  getImage(imageId: string): Promise<Image> {
     return this.request("GET", `/v1/images/${imageId}`);
   }
 
   /** GET /v1/images -- every custom sandbox image built for this account. */
-  async listImages(): Promise<any[]> {
+  async listImages(): Promise<Image[]> {
     const result = await this.request("GET", "/v1/images");
     return result ?? [];
   }
@@ -954,7 +1048,7 @@ export class BoxkiteClient {
    * @param options.label Optional human-readable label for the volume.
    * @param options.sizeGb Requested volume size in GB (max 1024).
    */
-  createVolume(options: CreateVolumeOptions): Promise<any> {
+  createVolume(options: CreateVolumeOptions): Promise<Volume> {
     const body: Record<string, unknown> = { size_gb: options.sizeGb };
     if (options?.label !== undefined) body.label = options.label;
     return this.request("POST", "/v1/volumes", body);
@@ -962,13 +1056,13 @@ export class BoxkiteClient {
 
   /** GET /v1/volumes/{volumeId} -- an independent storage volume's status
    * and details. */
-  getVolume(volumeId: string): Promise<any> {
+  getVolume(volumeId: string): Promise<Volume> {
     return this.request("GET", `/v1/volumes/${volumeId}`);
   }
 
   /** GET /v1/volumes -- every independent storage volume created for this
    * account. */
-  async listVolumes(): Promise<any[]> {
+  async listVolumes(): Promise<Volume[]> {
     const result = await this.request("GET", "/v1/volumes");
     return result ?? [];
   }
@@ -985,7 +1079,7 @@ export class BoxkiteClient {
    * the `X-Boxkite-Webhook-Signature` header on every delivery; it cannot
    * be retrieved again after this response.
    */
-  createWebhook(options: CreateWebhookOptions): Promise<any> {
+  createWebhook(options: CreateWebhookOptions): Promise<Webhook> {
     const body: Record<string, unknown> = {
       url: options.url,
       event_types: options.eventTypes,
@@ -996,7 +1090,7 @@ export class BoxkiteClient {
 
   /** GET /v1/webhooks -- webhook subscriptions for this account. The
    * signing secret is never returned here. */
-  async listWebhooks(): Promise<any[]> {
+  async listWebhooks(): Promise<Webhook[]> {
     const result = await this.request("GET", "/v1/webhooks");
     return result ?? [];
   }
@@ -1017,7 +1111,7 @@ export class BoxkiteClient {
   async listWebhookDeliveries(
     subscriptionId: string,
     options?: ListWebhookDeliveriesOptions,
-  ): Promise<any[]> {
+  ): Promise<WebhookDelivery[]> {
     const params: Record<string, string> = {};
     if (options?.limit !== undefined) params.limit = String(options.limit);
     if (options?.offset !== undefined) params.offset = String(options.offset);
@@ -1038,7 +1132,7 @@ export class BoxkiteClient {
    * hostname -- there is no MCP-proxy transport yet, so this does not yet
    * let an agent speak MCP protocol to the destination.
    */
-  createMcpConnection(options: CreateMcpConnectionOptions): Promise<any> {
+  createMcpConnection(options: CreateMcpConnectionOptions): Promise<McpConnection> {
     return this.request("POST", "/v1/mcp-connections", {
       label: options.label,
       catalog_id: options.catalogId,
@@ -1047,7 +1141,7 @@ export class BoxkiteClient {
 
   /** GET /v1/mcp-connections -- outbound-MCP connection grants for this
    * account. */
-  async listMcpConnections(): Promise<any[]> {
+  async listMcpConnections(): Promise<McpConnection[]> {
     const result = await this.request("GET", "/v1/mcp-connections");
     return result ?? [];
   }
@@ -1065,7 +1159,7 @@ export class BoxkiteClient {
    * created secret's metadata (id, name, allowedHosts, trustTier,
    * createdAt, lastUsedAt) -- never the raw value.
    */
-  createSecret(options: CreateSecretOptions): Promise<any> {
+  createSecret(options: CreateSecretOptions): Promise<Secret> {
     const body: Record<string, unknown> = {
       name: options.name,
       value: options.value,
@@ -1077,7 +1171,7 @@ export class BoxkiteClient {
 
   /** GET /v1/secrets -- secrets registered for this account. Raw values
    * are never returned here. */
-  async listSecrets(): Promise<any[]> {
+  async listSecrets(): Promise<Secret[]> {
     const result = await this.request("GET", "/v1/secrets");
     return result ?? [];
   }
@@ -1121,7 +1215,7 @@ export class SandboxSession {
     this.id = id;
   }
 
-  exec(command: string, options?: ExecOptions): Promise<any> {
+  exec(command: string, options?: ExecOptions): Promise<ExecResult> {
     return this.client.exec(this.id, command, options);
   }
 
@@ -1129,59 +1223,67 @@ export class SandboxSession {
     method: string,
     url: string,
     options?: { headers?: Record<string, string>; body?: string; timeout?: number },
-  ): Promise<any> {
+  ): Promise<HttpRequestResult> {
     return this.client.httpRequest(this.id, method, url, options);
   }
 
-  fileCreate(path: string, content: string, options?: FileOptions): Promise<any> {
+  fileCreate(path: string, content: string, options?: FileOptions): Promise<FileCreateResult> {
     return this.client.fileCreate(this.id, path, content, options);
   }
 
-  view(path: string, options?: ViewOptions): Promise<any> {
+  view(path: string, options?: ViewOptions): Promise<FileViewResult> {
     return this.client.view(this.id, path, options);
   }
 
-  strReplace(path: string, oldStr: string, newStr: string, options?: StrReplaceOptions): Promise<any> {
+  strReplace(
+    path: string,
+    oldStr: string,
+    newStr: string,
+    options?: StrReplaceOptions,
+  ): Promise<StrReplaceResult> {
     return this.client.strReplace(this.id, path, oldStr, newStr, options);
   }
 
-  ls(options?: LsOptions): Promise<any> {
+  ls(options?: LsOptions): Promise<LsResult> {
     return this.client.ls(this.id, options);
   }
 
-  glob(pattern: string, options?: GlobOptions): Promise<any> {
+  glob(pattern: string, options?: GlobOptions): Promise<GlobResult> {
     return this.client.glob(this.id, pattern, options);
   }
 
-  grep(pattern: string, options?: GrepOptions): Promise<any> {
+  grep(pattern: string, options?: GrepOptions): Promise<GrepResult> {
     return this.client.grep(this.id, pattern, options);
   }
 
-  getLog(options?: GetLogOptions): Promise<any> {
+  getLog(options?: GetLogOptions): Promise<GetLogResult> {
     return this.client.getLog(this.id, options);
   }
 
-  watch(): AsyncGenerator<any> {
+  watch(): AsyncGenerator<LogEntry> {
     return this.client.watch(this.id);
   }
 
-  startProcess(command: string, options?: StartProcessOptions): Promise<any> {
+  startProcess(command: string, options?: StartProcessOptions): Promise<ProcessStartResult> {
     return this.client.startProcess(this.id, command, options);
   }
 
-  listProcesses(): Promise<any> {
+  listProcesses(): Promise<ProcessListResult> {
     return this.client.listProcesses(this.id);
   }
 
-  getProcessOutput(processId: string, options?: GetProcessOutputOptions): Promise<any> {
+  getProcessOutput(
+    processId: string,
+    options?: GetProcessOutputOptions,
+  ): Promise<ProcessOutputResult> {
     return this.client.getProcessOutput(this.id, processId, options);
   }
 
-  sendProcessInput(processId: string, data: string): Promise<any> {
+  sendProcessInput(processId: string, data: string): Promise<ProcessInputResult> {
     return this.client.sendProcessInput(this.id, processId, data);
   }
 
-  stopProcess(processId: string): Promise<any> {
+  stopProcess(processId: string): Promise<ProcessStopResult> {
     return this.client.stopProcess(this.id, processId);
   }
 
@@ -1193,11 +1295,11 @@ export class SandboxSession {
     return this.client.desktopTakeover(this.id);
   }
 
-  createPreviewUrl(port: number, options?: CreatePreviewUrlOptions): Promise<any> {
+  createPreviewUrl(port: number, options?: CreatePreviewUrlOptions): Promise<PreviewUrl> {
     return this.client.createPreviewUrl(this.id, port, options);
   }
 
-  revokePreviewUrl(port: number, tokenId: string): Promise<any> {
+  revokePreviewUrl(port: number, tokenId: string): Promise<PreviewRevokeResult> {
     return this.client.revokePreviewUrl(this.id, port, tokenId);
   }
 }

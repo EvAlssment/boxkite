@@ -42,6 +42,7 @@ def test_exec_request_ignores_unexpected_env_field(monkeypatch):
 
     monkeypatch.setattr(sidecar_main.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(sidecar_main, "RUNTIME_MODE", "compose")
+    monkeypatch.setattr(sidecar_main, "get_sandbox_pid", lambda: 4242)
 
     from fastapi.testclient import TestClient
 

@@ -62,7 +62,8 @@ async function main() {
     // Simulate a delivery to prove verifySignature works, without a real
     // receiver: sign a synthetic payload locally with the just-printed
     // secret, then verify it the same way a receiver would.
-    const secret: string = webhook.secret;
+    // createWebhook is the one route that returns the signing secret.
+    const secret: string = webhook.secret ?? "";
     const rawBody = Buffer.from(
       JSON.stringify({ event_type: "sandbox.created", event_id: "evt_demo" }),
     );

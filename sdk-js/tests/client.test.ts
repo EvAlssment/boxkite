@@ -659,7 +659,9 @@ test("createSecret sends name, value, and allowedHosts", async () => {
     allowedHosts: ["api.stripe.com"],
   });
   assert.equal(result.id, "secret-1");
-  assert.equal(result.value, undefined);
+  // The raw value is never returned -- Secret has no `value` field, so
+  // assert its absence at runtime through an untyped view.
+  assert.equal((result as unknown as Record<string, unknown>).value, undefined);
 });
 
 test("createSecret sends trustTier when given", async () => {
@@ -1491,4 +1493,116 @@ test("takeover sends and receives raw bytes against a real local WebSocket serve
   } finally {
     wss.close();
   }
+});
+
+// --- Retry policy (opt-in exponential backoff + jitter, issue #14) ---
+
+/** A fetch stand-in that returns each queued Response (or throws each
+ * queued Error) in order, one per call, and records how many times it was
+ * called. */
+function sequencedFetch(steps: Array<Response | Error>): { fetch: typeof fetch; calls: () => number } {
+  let i = 0;
+  const fetchImpl = (async () => {
+    const step = steps[Math.min(i, steps.length - 1)];
+    i++;
+    if (step instanceof Error) throw step;
+    return step;
+  }) as typeof fetch;
+  return { fetch: fetchImpl, calls: () => i };
+}
+
+function retryClient(fetchImpl: typeof fetch, maxRetries = 2): BoxkiteClient {
+  return new BoxkiteClient({
+    baseUrl: "https://cp.example.com",
+    apiKey: "bxk_live_test",
+    fetchImpl,
+    retry: { maxRetries, initialDelayMs: 1, maxDelayMs: 2 },
+  });
+}
+
+test("retries an idempotent GET on 503 then succeeds", async () => {
+  const seq = sequencedFetch([
+    new Response(JSON.stringify({ error: { code: "unavailable", message: "busy" } }), { status: 503 }),
+    new Response(JSON.stringify({ id: "acct-1", email: "a@example.com" }), { status: 200 }),
+  ]);
+  const client = retryClient(seq.fetch);
+
+  const result = await client.account();
+  assert.deepEqual(result, { id: "acct-1", email: "a@example.com" });
+  assert.equal(seq.calls(), 2);
+});
+
+test("retries an idempotent GET on a connection error then succeeds", async () => {
+  const seq = sequencedFetch([
+    new TypeError("network down"),
+    new Response(JSON.stringify([{ id: "sess-1" }]), { status: 200 }),
+  ]);
+  const client = retryClient(seq.fetch);
+
+  const result = await client.listSandboxes();
+  assert.equal(result.length, 1);
+  assert.equal(seq.calls(), 2);
+});
+
+test("gives up after maxRetries and throws the last error", async () => {
+  const seq = sequencedFetch([
+    new Response(JSON.stringify({ error: { code: "unavailable", message: "busy" } }), { status: 503 }),
+  ]);
+  const client = retryClient(seq.fetch, 2);
+
+  await assert.rejects(
+    () => client.account(),
+    (err: unknown) => err instanceof BoxkiteApiError && err.statusCode === 503,
+  );
+  // initial attempt + 2 retries
+  assert.equal(seq.calls(), 3);
+});
+
+test("does not retry a non-idempotent POST", async () => {
+  const seq = sequencedFetch([
+    new Response(JSON.stringify({ error: { code: "unavailable", message: "busy" } }), { status: 503 }),
+  ]);
+  const client = retryClient(seq.fetch);
+
+  await assert.rejects(() => client.createSandbox({ label: "x" }), BoxkiteApiError);
+  assert.equal(seq.calls(), 1);
+});
+
+test("does not retry a 4xx that is not 429", async () => {
+  const seq = sequencedFetch([
+    new Response(JSON.stringify({ error: { code: "not_found", message: "gone" } }), { status: 404 }),
+  ]);
+  const client = retryClient(seq.fetch);
+
+  await assert.rejects(() => client.getSandbox("missing"), BoxkiteApiError);
+  assert.equal(seq.calls(), 1);
+});
+
+test("retries on 429 and honors a Retry-After header", async () => {
+  const seq = sequencedFetch([
+    new Response(JSON.stringify({ error: { code: "rate_limited", message: "slow down" } }), {
+      status: 429,
+      headers: { "Retry-After": "0" },
+    }),
+    new Response(JSON.stringify({ id: "acct-1", email: "a@example.com" }), { status: 200 }),
+  ]);
+  const client = retryClient(seq.fetch);
+
+  const result = await client.account();
+  assert.equal(result.id, "acct-1");
+  assert.equal(seq.calls(), 2);
+});
+
+test("does not retry when the retry option is omitted (default off)", async () => {
+  const seq = sequencedFetch([
+    new Response(JSON.stringify({ error: { code: "unavailable", message: "busy" } }), { status: 503 }),
+  ]);
+  const client = new BoxkiteClient({
+    baseUrl: "https://cp.example.com",
+    apiKey: "bxk_live_test",
+    fetchImpl: seq.fetch,
+  });
+
+  await assert.rejects(() => client.account(), BoxkiteApiError);
+  assert.equal(seq.calls(), 1);
 });

@@ -30,13 +30,12 @@ services:
   sandbox:
     image: "${BOXKITE_SANDBOX_IMAGE:-boxkite-sandbox-minimal:bundle}"
     pull_policy: never
-    # MUST stay literally "sandbox" — sidecar/sidecar_execution.py's
-    # compose-mode exec_in_sandbox() (and sidecar_browser.py,
-    # sidecar_interpreter.py, sidecar_node_interpreter.py,
-    # sidecar_processes.py) all hardcode `docker exec ... sandbox ...`, not
-    # a configurable name. Renaming this breaks /exec at runtime, not just
-    # at naming-collision time — verified the hard way while building this
-    # bundle (see README.md).
+    # MUST stay literally "sandbox" — the sidecar service's `pid:
+    # "container:sandbox"` below hardcodes this container name to share its
+    # PID namespace (get_sandbox_pid() in sidecar/main.py finds it by
+    # pgrep'ing for this container's own init process). Renaming this
+    # breaks /exec at runtime, not just at naming-collision time — verified
+    # the hard way while building this bundle (see README.md).
     container_name: sandbox
     command: ["tail", "-f", "/dev/null"]
     security_opt:
@@ -63,12 +62,23 @@ services:
     image: "${BOXKITE_SIDECAR_IMAGE:-boxkite-sidecar:bundle}"
     pull_policy: never
     user: "0"
+    # Same PID-namespace sharing + capability grant as ../docker-compose.yml
+    # — see that file's inline comment for the full rationale (nsenter needs
+    # these instead of the docker-socket-mounted `docker exec` this bundle
+    # used to rely on).
+    pid: "container:sandbox"
+    cap_add:
+      - SYS_PTRACE
+      - SYS_ADMIN
+      - CHOWN
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
+    cap_drop:
+      - ALL
     ports:
       - "8080:8080"
-    # Same local-dev-only docker-socket caveat as ../docker-compose.yml —
-    # see that file's inline comment and SECURITY.md. Unchanged here.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - uploads:/mnt/user-data/uploads
       - outputs:/mnt/user-data/outputs
       - skills:/mnt/skills

@@ -1,9 +1,11 @@
 /**
  * LangChain.js tool factory over a hosted boxkite control-plane.
  *
- * Mirrors the Python SDK's create_sandbox_tools (same seven tool names:
- * bash_tool, file_create, view, str_replace, ls, glob, grep) and
- * boxkite.tools' own shapes, so switching between a self-hosted deployment
+ * Mirrors the Python SDK's create_sandbox_tools (same twelve tool names:
+ * bash_tool, file_create, view, str_replace, ls, glob, grep, start_process,
+ * get_process_output, send_process_input, stop_process, list_processes; plus
+ * an optional http_request tool) and boxkite.tools' own shapes, so switching
+ * between a self-hosted deployment
  * and this hosted client needs no changes beyond which factory produced
  * the tools. Requires `@langchain/core` as a peer dependency -- import
  * from "boxkite-client/langchain", not the package root, so consumers who

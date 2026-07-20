@@ -122,17 +122,6 @@ Swap `boxkite-sandbox` for `boxkite-sandbox-minimal`, `boxkite-sidecar`, or
 
 Disclosed here rather than left for you to discover:
 
-- **docker-compose local-dev mode bind-mounts the host's `docker.sock`**
-  (`/var/run/docker.sock`) into the root-running sidecar container so it
-  can `docker exec` into the sandbox container. Anyone with a live
-  connection to that socket can trivially escalate to full **host-root**
-  compromise (e.g. `docker run --privileged -v /:/host ...`) — verified
-  directly, including that the standard `docker-socket-proxy` mitigation
-  does **not** close it. This mode is single-developer local dev only —
-  never production or multi-tenant. It does not exist in the Kubernetes
-  runtime at all (no docker socket, no docker-in-docker). See the README's
-  "Self-hosting" section for the full warning, and
-  `deploy/docker-compose.yml`'s own inline warning at the mount itself.
 - **`deploy/sandbox.Dockerfile`'s pandoc and Chrome-for-Testing downloads**
   verify `sha256sum -c` against pinned digests, and those pinned digests
   have been independently cross-checked against a second source (2026-07-12,

@@ -4,8 +4,9 @@ exec, and file tools as native MCP tools.
 Unlike ``boxkite_client.langchain_tools.create_sandbox_tools`` (which binds
 one pre-created ``session_id`` at factory-creation time), every per-sandbox
 tool here takes ``session_id`` as a parameter -- the calling MCP client
-(Claude Code, Claude Desktop, Cursor, ...) owns the full lifecycle: create a
-sandbox, run several things in it, destroy it, all within one conversation.
+(Claude Code, Claude Desktop, Codex, Cursor, ...) owns the full lifecycle:
+create a sandbox, run several things in it, destroy it, all within one
+conversation.
 
 Configuration is read from the environment at import time (``BOXKITE_BASE_URL``,
 ``BOXKITE_API_KEY``) and the process fails fast with a clear error if either

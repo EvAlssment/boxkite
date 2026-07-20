@@ -1,6 +1,6 @@
 {
   "name": "boxkite-client",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "TypeScript/JavaScript client for a hosted boxkite control-plane (sandbox creation, exec, files).",
   "license": "MIT",
   "repository": {
