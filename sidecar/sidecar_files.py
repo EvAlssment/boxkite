@@ -597,11 +597,14 @@ async def str_replace(req: main.StrReplaceRequest):
         try:
             with os.fdopen(tmp_fd, "w") as f:
                 f.write(new_content)
+            # Set the mode BEFORE handing the file to SANDBOX_UID: the sidecar is
+            # root but has no CAP_FOWNER, so once the temp is chown'd away from
+            # root, chmod on it would EPERM. chmod-while-owner, then chown.
+            os.chmod(tmp_path, orig_mode)
             try:
                 os.chown(tmp_path, main.SANDBOX_UID, main.SANDBOX_GID)
             except OSError as chown_err:
                 logger.warning(f"[str-replace] Skipped ownership set on {full_path}: {chown_err}")
-            os.chmod(tmp_path, orig_mode)
             os.replace(tmp_path, full_path)
         except BaseException:
             try:
