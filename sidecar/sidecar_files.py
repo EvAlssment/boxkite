@@ -24,6 +24,7 @@ import re
 import select
 import shutil
 import struct
+import tempfile
 import time as _time
 from datetime import datetime
 from fnmatch import fnmatch
@@ -581,22 +582,33 @@ async def str_replace(req: main.StrReplaceRequest):
             replaced_count = 1
 
         full_path = main._revalidate_path_or_400(full_path)
-        async with aiofiles.open(full_path, 'w') as f:
-            await f.write(new_content)
-            # Best-effort ownership re-assert via the open fd. Unlike
-            # file_create (which hands a brand-new root-owned file to the
-            # sandbox user, so its chown is load-bearing), str_replace edits a
-            # file that already exists via an in-place 'w' open that preserves
-            # the inode's existing ownership -- so this fchown is redundant for
-            # correctness. It must NEVER fail the whole edit: the content write
-            # has already succeeded, and an environment where the sidecar can't
-            # chown to SANDBOX_UID (not root / no CAP_CHOWN / restricted fs)
-            # would otherwise turn every str_replace into a 500 -> 502 even
-            # though the file was edited on disk.
+        # The existing file is owned by SANDBOX_UID (file_create chowns every
+        # file it hands the sandbox). The sidecar runs as root but WITHOUT
+        # CAP_DAC_OVERRIDE, so opening that file directly with 'w' fails EACCES
+        # -- which is exactly why str_replace used to 500 -> 502 on every call
+        # while file_create (which creates a brand-new root-owned file) worked.
+        # Mirror file_create: write a fresh root-owned temp file, hand it to the
+        # sandbox user, then atomically replace the target. os.replace only needs
+        # write on the enclosing dir (the 0777 workspace), which the sidecar has,
+        # and the swap is atomic so a reader never sees a half-written file.
+        dir_name = os.path.dirname(full_path)
+        orig_mode = os.stat(full_path).st_mode & 0o777
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=dir_name, prefix=".str-replace-")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                f.write(new_content)
             try:
-                os.fchown(f.fileno(), main.SANDBOX_UID, main.SANDBOX_GID)
+                os.chown(tmp_path, main.SANDBOX_UID, main.SANDBOX_GID)
             except OSError as chown_err:
-                logger.warning(f"[str-replace] Skipped ownership re-assert on {full_path}: {chown_err}")
+                logger.warning(f"[str-replace] Skipped ownership set on {full_path}: {chown_err}")
+            os.chmod(tmp_path, orig_mode)
+            os.replace(tmp_path, full_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         if main._storage_bucket_for_virtual_path(virtual_path) is not None:
             main.pending_sync_files.add(virtual_path)

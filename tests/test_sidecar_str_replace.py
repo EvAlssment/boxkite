@@ -1,20 +1,20 @@
 """Regression tests for the sidecar /str-replace handler.
 
 Guards the bug where str_replace returned a 500 (surfaced by the control-plane
-as a 502 `sandbox_operation_failed`) on every call in any environment where the
-sidecar could not `os.fchown` the edited file to SANDBOX_UID -- e.g. when it is
-not running as root / lacks CAP_CHOWN / is on a restricted filesystem. The
-content write already succeeded at that point, so the operation reported total
-failure despite having edited the file on disk.
+as a 502 `sandbox_operation_failed`) on every call against the hosted deployment.
+Root cause found on the live cluster: file_create hands every file to
+SANDBOX_UID (1001) via chown, and the sidecar runs as root but WITHOUT
+CAP_DAC_OVERRIDE, so opening that 1001-owned file in place with 'w' fails EACCES
+-- str_replace's write failed before it ever ran, while file_create (which
+creates a brand-new root-owned file) worked. The fix writes a fresh root-owned
+temp file, chowns it to SANDBOX_UID, then atomically os.replace()s it over the
+target (needing only write on the 0777 workspace dir), so no in-place write of a
+differently-owned file is ever attempted.
 
-Unlike file_create (whose chown of a brand-new root-owned file is load-bearing),
-str_replace edits a pre-existing file via an in-place 'w' open that preserves the
-inode's existing ownership, so the ownership re-assert is non-essential and must
-be best-effort.
-
-These call the real handler in-process (SANDBOX_UID left at its 1001 default, so
-the real fchown genuinely fails under a normal non-root test user) with the exact
-JSON body the SDK/control-plane send.
+These call the real handler in-process with the exact JSON body the
+SDK/control-plane send. SANDBOX_UID is left at its 1001 default so the temp-file
+chown genuinely no-ops for a normal non-root test user (mirroring the best-effort
+chown), which must not fail the edit.
 """
 
 import os
@@ -106,6 +106,32 @@ def test_str_replace_still_edits_when_fchown_succeeds(tmp_path, monkeypatch):
 
     assert resp.status_code == 200, resp.text
     assert target.read_text() == "hello there"
+
+
+def test_str_replace_succeeds_when_target_is_not_writable_in_place(tmp_path, monkeypatch):
+    """The real hosted regression, in unit-testable form: the target file cannot
+    be opened for writing in place (mode 0o444), but str_replace must still
+    succeed because it writes a temp file and atomically replaces the target
+    (which needs only write permission on the enclosing dir, not the file). This
+    is the local analog of the sidecar being root-without-CAP_DAC_OVERRIDE facing
+    a SANDBOX_UID-owned file."""
+    client = _client(monkeypatch, tmp_path)
+
+    target = tmp_path / "ro.py"
+    target.write_text("value = 1\n")
+    os.chmod(target, 0o444)  # in-place open('w') would EACCES
+    try:
+        resp = _post_str_replace(
+            client,
+            {"path": "ro.py", "old_str": "value = 1", "new_str": "value = 42", "replace_all": False},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["replaced"] is True
+        assert target.read_text() == "value = 42\n"
+        # original mode is preserved on the replacement
+        assert (os.stat(target).st_mode & 0o777) == 0o444
+    finally:
+        os.chmod(target, 0o644)
 
 
 def test_str_replace_no_match_returns_not_replaced(tmp_path, monkeypatch):
