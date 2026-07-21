@@ -78,7 +78,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -939,3 +939,101 @@ class EmailVerificationToken(Base):
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     account: Mapped["Account"] = relationship()
+
+
+class IdempotencyKey(Base):
+    """Caches the response of a POST that carried an `Idempotency-Key` header so
+    a client retry after a network blip replays the original outcome instead of
+    creating a duplicate resource — the Stripe idempotency pattern (see
+    idempotency.py, the ASGI middleware that reads/writes these rows). Only
+    requests that actually send the header ever touch this table; ordinary
+    traffic is unaffected.
+
+    `scope_hash` is a SHA-256 of the key + caller identity + path, so the same
+    key from a different account/route can't collide. `response_status` is NULL
+    while the original request is still in flight (a concurrent retry then gets
+    409); once set, the row is a completed, replayable result.
+    """
+
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (Index("ix_idempotency_keys_created_at", "created_at"),)
+
+    scope_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_body: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    response_media_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class Organization(Base):
+    """A basic team/organization: a named group an account creates and adds
+    other accounts to (see OrganizationMember). Deliberately minimal for now —
+    sandbox ownership is still keyed on `account_id`; this adds the org/team
+    *entity* and membership so shared-ownership scoping can build on it later
+    without another schema migration. No billing concepts (fair-use only)."""
+
+    __tablename__ = "organizations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_by_account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    members: Mapped[list["OrganizationMember"]] = relationship(
+        back_populates="organization", cascade="all, delete-orphan"
+    )
+
+
+class OrganizationMember(Base):
+    """One account's membership in one organization, with a coarse role
+    (`owner`/`admin`/`member`). Unique per (organization, account)."""
+
+    __tablename__ = "organization_members"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "account_id", name="uq_org_member"),
+        Index("ix_organization_members_account", "account_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    organization: Mapped["Organization"] = relationship(back_populates="members")
+    account: Mapped["Account"] = relationship()
+
+
+class OrganizationInvite(Base):
+    """A pending invitation to join an organization (org/team, issue #225).
+    Lets an owner/admin invite someone by email even before that person has a
+    boxkite account. Only a SHA-256 hash of the single-use token is stored
+    (`token_hash`, same posture as api_keys / email_verification_tokens); the
+    raw token is returned to the inviter exactly once. Redeemed via
+    `POST /v1/organizations/accept-invite`, which requires the accepting
+    account's email to match `email`."""
+
+    __tablename__ = "organization_invites"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
+    organization_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    invited_by_account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    organization: Mapped["Organization"] = relationship()

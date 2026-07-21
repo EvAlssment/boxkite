@@ -1077,6 +1077,26 @@ def test_async_watch_yields_parsed_sse_entries():
     assert entries == [{"operation": "exec", "detail": {"command": "echo hi"}}]
 
 
+def test_async_stream_process_output_yields_output_then_exit():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/sandboxes/sess-1/processes/proc-1/stream"
+        body = (
+            b'event: output\ndata: {"type": "output", "stdout_chunk": "hi", "next_offset": 2}\n\n'
+            b'event: exit\ndata: {"type": "exit", "status": "exited", "exit_code": 0}\n\n'
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async def run():
+        client = _client_with(handler)
+        events = [e async for e in client.stream_process_output("sess-1", "proc-1")]
+        await client.aclose()
+        return events
+
+    events = asyncio.run(run())
+    assert events[0] == {"type": "output", "stdout_chunk": "hi", "next_offset": 2}
+    assert events[-1] == {"type": "exit", "status": "exited", "exit_code": 0}
+
+
 def test_async_watch_raises_on_error_status():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"error": {"code": "not_found", "message": "no such session"}})

@@ -131,7 +131,10 @@ class WarmPoolMixin:
                     continue
 
         except Exception as e:
-            logger.warning(f"[SandboxManager] K8s warm pod discovery failed: {e}")
+            logger.warning(
+                f"[SandboxManager] K8s warm pod discovery failed; falling back to a "
+                f"cold pod create for this session: {e}"
+            )
 
         return None
 

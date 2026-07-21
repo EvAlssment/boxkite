@@ -1,4 +1,4 @@
-"""Minimal LangChain agent using only 2 of boxkite's 5 tools.
+"""Minimal LangChain agent using only 2 of boxkite's 15 default tools.
 
 Deliberately smaller than ../langgraph_agent: no explicit graph, just
 `langchain.agents.create_agent` (the current LangChain agent entry point,
@@ -16,9 +16,11 @@ Prerequisites:
 
 Run:
     export ANTHROPIC_API_KEY=sk-ant-...
-    export SIDECAR_AUTH_TOKEN=$(grep ^SIDECAR_AUTH_TOKEN= ~/.boxkite/local.env | cut -d= -f2)
-    export RUNTIME_MODE=compose SIDECAR_URL=http://localhost:8080
+    export RUNTIME_MODE=compose
     python agent.py
+
+  (SandboxManager auto-loads the sidecar token + URL from
+  ~/.boxkite/local.env, written by `boxkite up` — no manual export needed.)
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ async def main() -> None:
     await manager.create_session(organization_id=uuid4(), session_id=session_id)
 
     try:
-        # Only 2 of the 5 available tools -- narrower than the LangGraph
+        # Only 2 of the 15 default tools -- narrower than the LangGraph
         # example on purpose, to show the tools are independently usable.
         tools = [
             create_bash_tool(session_id=session_id, sandbox_manager=manager),

@@ -48,6 +48,7 @@ export type {
   ProcessOutputResult,
   ProcessInputResult,
   ProcessStopResult,
+  ProcessStreamEvent,
   PreviewUrl,
   PreviewRevokeResult,
   Image,

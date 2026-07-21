@@ -1454,3 +1454,54 @@ class DemoSandboxExecResponse(BaseModel):
     truncated: bool = Field(
         description="True if stdout and/or stderr were cut off at DEMO_EXEC_OUTPUT_MAX_LENGTH."
     )
+
+
+# ── Organizations / teams (basic) ──────────────────────────────────────────
+class OrganizationCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200, description="Display name for the organization.")
+
+
+class OrganizationResponse(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+    role: str = Field(description="The requesting account's role in this organization.")
+
+
+class OrganizationMemberAddRequest(BaseModel):
+    email: EmailStr = Field(description="Email of an existing account to add as a member.")
+    role: Literal["admin", "member"] = Field(
+        default="member", description="Role to grant. Ownership is only assigned at creation."
+    )
+
+
+class OrganizationMemberResponse(BaseModel):
+    account_id: str
+    email: str
+    role: str
+    created_at: datetime
+
+
+class OrganizationInviteCreateRequest(BaseModel):
+    email: EmailStr = Field(description="Email to invite (need not have an account yet).")
+    role: Literal["admin", "member"] = Field(default="member")
+
+
+class OrganizationInviteCreatedResponse(BaseModel):
+    id: str
+    email: str
+    role: str
+    expires_at: datetime
+    token: str = Field(description="Single-use invite token — shown only once, at creation.")
+
+
+class OrganizationInviteResponse(BaseModel):
+    id: str
+    email: str
+    role: str
+    created_at: datetime
+    expires_at: datetime
+
+
+class OrganizationInviteAcceptRequest(BaseModel):
+    token: str = Field(min_length=1, description="The invite token from the invitation.")

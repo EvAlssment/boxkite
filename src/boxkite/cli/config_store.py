@@ -103,20 +103,15 @@ class LocalConfig:
 
 
 def read_local_env() -> LocalConfig | None:
-    if not LOCAL_ENV_FILE.exists():
-        return None
-    values: dict[str, str] = {}
-    for line in LOCAL_ENV_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
+    # Delegates to the shared core parser (also used by SandboxManager's
+    # compose-mode fallback), passing this module's LOCAL_ENV_FILE so tests
+    # that monkeypatch it keep working.
+    from ..local_env import read_local_env_credentials
 
-    token = values.get("SIDECAR_AUTH_TOKEN")
-    sidecar_url = values.get("SIDECAR_URL")
-    if not token or not sidecar_url:
+    creds = read_local_env_credentials(LOCAL_ENV_FILE)
+    if creds is None:
         return None
+    sidecar_url, token = creds
     return LocalConfig(sidecar_url=sidecar_url, token=token)
 
 

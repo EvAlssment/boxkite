@@ -17,16 +17,19 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from boxkite import close_sandbox_manager, close_warm_pool, get_sandbox_manager, get_warm_pool
 
 from .config import settings
-from .db import dispose_engine, init_schema
+from .db import dispose_engine, get_engine, init_schema
 from .errors import ApiError, api_error_handler
+from .idempotency import IdempotencyMiddleware
+from .observability import RequestMetricsMiddleware, configure_logging, render_metrics
 from .hosted_mcp import build_hosted_mcp_asgi_app
 from .reaper import run_reaper_loop
 from .routers import (
@@ -40,6 +43,7 @@ from .routers import (
     internal_secrets,
     mcp_connections,
     oauth,
+    organizations,
     sandboxes,
     scim,
     secrets,
@@ -67,12 +71,16 @@ _webhook_delivery_task: asyncio.Task | None = None
 _hosted_mcp, _hosted_mcp_asgi_app = build_hosted_mcp_asgi_app()
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    global _reaper_stop_event, _reaper_task, _webhook_delivery_stop_event, _webhook_delivery_task
+def verify_startup_config(cfg) -> None:
+    """Fail-fast guard against insecure defaults leaking into a real deploy.
 
-    if settings.JWT_SECRET == "insecure-dev-secret-change-me-32-bytes-minimum":
-        if settings.is_dev_environment:
+    In a dev/test ENVIRONMENT these downgrade to warnings so zero-config local
+    iteration keeps working; anywhere else they raise RuntimeError and abort
+    startup. Pure function of the settings object so it's unit-testable without
+    driving the whole app lifespan.
+    """
+    if cfg.JWT_SECRET == "insecure-dev-secret-change-me-32-bytes-minimum":
+        if cfg.is_dev_environment:
             logger.warning(
                 "[control-plane] JWT_SECRET is at its insecure default placeholder. "
                 "Set a real secret via the JWT_SECRET env var before deploying "
@@ -81,10 +89,40 @@ async def lifespan(_app: FastAPI):
         else:
             raise RuntimeError(
                 "[control-plane] JWT_SECRET is at its insecure default placeholder "
-                f"while ENVIRONMENT={settings.ENVIRONMENT!r}. Refusing to start: set "
+                f"while ENVIRONMENT={cfg.ENVIRONMENT!r}. Refusing to start: set "
                 "a real secret via the JWT_SECRET env var (e.g. `openssl rand -hex "
                 "32`) before deploying this outside local development."
             )
+
+    # The "local" secrets-KMS backend protects Secret.ciphertext with a local
+    # dev key (ephemeral when SECRETS_LOCAL_DEV_KMS_KEY is unset) and is
+    # documented as NOT a real KMS. Refuse it outside dev unless explicitly
+    # accepted, so a deploy that forgot to wire up a cloud KMS fails loudly
+    # instead of silently shipping weakly-protected secrets.
+    if cfg.SECRETS_KMS_BACKEND == "local" and not cfg.is_dev_environment:
+        if cfg.BOXKITE_ALLOW_INSECURE_LOCAL_KMS:
+            logger.warning(
+                "[control-plane] SECRETS_KMS_BACKEND='local' while "
+                f"ENVIRONMENT={cfg.ENVIRONMENT!r}: Secret.ciphertext is protected by "
+                "a local dev key, not a real KMS. Running anyway because "
+                "BOXKITE_ALLOW_INSECURE_LOCAL_KMS=true is set."
+            )
+        else:
+            raise RuntimeError(
+                "[control-plane] SECRETS_KMS_BACKEND='local' is not a real KMS and "
+                f"must not be used while ENVIRONMENT={cfg.ENVIRONMENT!r}. Refusing to "
+                "start: set SECRETS_KMS_BACKEND to aws/azure/gcp with SECRETS_KMS_KEY_ID, "
+                "or set BOXKITE_ALLOW_INSECURE_LOCAL_KMS=true to explicitly accept a "
+                "local dev key outside development."
+            )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _reaper_stop_event, _reaper_task, _webhook_delivery_stop_event, _webhook_delivery_task
+
+    configure_logging(settings)
+    verify_startup_config(settings)
 
     await init_schema()
 
@@ -163,12 +201,20 @@ app.add_exception_handler(ApiError, api_error_handler)
 # actual first-party browser client(s) instead -- server-side/SDK callers
 # (not running in a browser) are never subject to CORS at all, so this
 # costs them nothing.
+# Added before CORS so CORS stays outermost and still wraps idempotent replays.
+# A strict no-op unless a request is a POST carrying an Idempotency-Key header.
+app.add_middleware(IdempotencyMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.CORS_ALLOWED_ORIGINS),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Outermost of the add_middleware set so it times the full response and stamps
+# every reply with X-Request-ID. Pure-ASGI: never buffers the body.
+app.add_middleware(RequestMetricsMiddleware)
 
 
 @app.middleware("http")
@@ -229,6 +275,7 @@ app.include_router(enterprise_sso.router)
 app.include_router(scim.router)
 app.include_router(webhooks.router)
 app.include_router(demo_playground.router)
+app.include_router(organizations.router)
 
 # Hosted, remote MCP endpoint (docs/HOSTED-MCP-DESIGN.md) -- Streamable
 # HTTP transport, bearer-token auth via BearerTokenAuthMiddleware (wrapped
@@ -241,4 +288,43 @@ app.mount("/mcp", _hosted_mcp_asgi_app)
 
 @app.get("/health", tags=["meta"], summary="Liveness check")
 async def health() -> dict:
+    # Cheap liveness probe: "is the process up?" — deliberately does no
+    # dependency I/O so a transient DB blip can't trigger a pod restart.
+    # Use /health/ready for a dependency-aware readiness signal.
     return {"status": "ok"}
+
+
+@app.get(
+    "/health/ready",
+    tags=["meta"],
+    summary="Readiness check (verifies database connectivity)",
+)
+async def readiness(response: Response) -> dict:
+    """Verify the control-plane can actually serve traffic by round-tripping a
+    trivial query to the database. Returns 503 when the DB is unreachable so a
+    Kubernetes readiness probe pulls the pod out of rotation instead of routing
+    requests that would fail."""
+    try:
+        engine = get_engine()
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001 — any failure means "not ready"
+        logger.warning("Readiness check failed: database unreachable: %s", exc)
+        response.status_code = 503
+        return {"status": "unavailable", "checks": {"database": "unreachable"}}
+    return {"status": "ready", "checks": {"database": "ok"}}
+
+
+@app.get(
+    "/metrics",
+    tags=["meta"],
+    summary="Prometheus metrics exposition",
+    include_in_schema=False,
+)
+async def metrics() -> Response:
+    """Prometheus exposition of request counts + latency. 404s when
+    BOXKITE_METRICS_ENABLED is false (same opt-out convention as the API docs)."""
+    if not settings.BOXKITE_METRICS_ENABLED:
+        return Response(status_code=404)
+    body, content_type = render_metrics()
+    return Response(content=body, media_type=content_type)

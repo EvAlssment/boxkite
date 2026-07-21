@@ -184,6 +184,12 @@ export interface ProcessOutputResult {
   exit_code: number | null;
 }
 
+/** One event from GET /v1/sandboxes/{id}/processes/{processId}/stream: an
+ * `output` per new stdout chunk, then a terminal `exit`. */
+export type ProcessStreamEvent =
+  | { type: "output"; stdout_chunk: string; next_offset: number; truncated: boolean }
+  | { type: "exit"; status: string; exit_code: number | null };
+
 /** POST /v1/sandboxes/{id}/processes/{processId}/input. */
 export interface ProcessInputResult {
   bytes_written: number;

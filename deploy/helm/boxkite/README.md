@@ -72,6 +72,12 @@ being present on `PATH`, and skips outright otherwise.
 helm uninstall boxkite --namespace boxkite
 ```
 
+## Cold-start latency
+
+The dominant cold-start cost is pulling the ~1.32 GB sandbox image. See
+[`../COLD-START-TUNING.md`](../COLD-START-TUNING.md) for the levers: GKE Image
+Streaming, choosing a smaller `SANDBOX_IMAGE`, and warm-pool sizing.
+
 ## Parity with the runtime code
 
 `tests/test_pod_template_parity.py::test_helm_values_defaults_match_resource_config_defaults`

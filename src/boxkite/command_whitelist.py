@@ -40,6 +40,16 @@ shell-token-aware:
   is blocked because it could run anything. Any args_allow/args_deny on an
   ssh rule also apply to the full ssh argument string (e.g. restrict the
   destination host).
+- Argument-position command runners get the same recursive treatment as ssh:
+  env, xargs, timeout, nohup, nice, setsid, stdbuf, watch and flock all launch
+  a program named in their arguments, so allowlisting one of them would
+  otherwise be a hole straight past the allowlist (`timeout 1 rm -rf /` with
+  only "timeout" allowed). When such a wrapper is allowlisted, its option
+  prefix is skipped and the wrapped command is extracted and validated against
+  the same allowlist, so `timeout 5 grep foo` passes only if `grep` is also
+  allowed. `find` with an -exec/-execdir/-ok/-okdir action is denied outright
+  in whitelist mode (its escaped-semicolon / `+` command terminator makes
+  reliable extraction fragile, so it fails safe).
 
 Constructs that can smuggle hidden commands are rejected outright in
 whitelist mode: command substitution ($(...) and backticks), process
@@ -291,6 +301,159 @@ def _validate_ssh_command(
     return _validate(remote_command, rules, depth + 1)
 
 
+# find actions that run an arbitrary program; see the deny rationale in
+# _validate_command_runner.
+_FIND_EXEC_ACTIONS = {"-exec", "-execdir", "-ok", "-okdir"}
+
+
+def _extract_wrapped_command(
+    tokens: list[str],
+    *,
+    value_opts: set[str],
+    command_opts: frozenset = frozenset(),
+    skip_positionals: int = 0,
+    skip_assignments: bool = False,
+) -> list[str]:
+    """
+    Locate the program a command-runner wrapper will execute.
+
+    Skips the wrapper's option prefix, then returns the remaining tokens
+    joined as a shell command string to recursively validate.
+
+    - value_opts: options that consume the following token as a value
+      (e.g. timeout's -s/-k). Their combined form (-n2) and --long=value form
+      are skipped as single tokens too.
+    - command_opts: options whose value is itself a command string to validate
+      instead of a wrapped program (e.g. flock's -c, env's -S/--split-string).
+    - skip_positionals: fixed positional args before the command
+      (e.g. timeout's DURATION).
+    - skip_assignments: skip leading VAR=value tokens (env).
+
+    Returns a list of shell command strings to validate, or [] when the wrapper
+    runs no wrapped program (e.g. bare `env`). Best-effort and fail-safe: an
+    unrecognized option is skipped as a boolean flag, which can only ever cause
+    an over-block downstream, never let a command slip through unvalidated.
+    """
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if skip_assignments and _is_env_assignment(tok):
+            i += 1
+            continue
+        if tok == "--":
+            i += 1
+            break
+        if tok in command_opts:
+            return [tokens[i + 1]] if i + 1 < n else []
+        if tok.startswith("--") and "=" in tok:
+            if tok.split("=", 1)[0] in command_opts:
+                return [tok.split("=", 1)[1]]
+            i += 1
+            continue
+        if tok in value_opts:
+            i += 2
+            continue
+        if tok.startswith("-") and tok != "-":
+            # A combined short command-opt (-c'...' / -S'...') carries its
+            # command inline; everything else is an option token to skip.
+            for copt in command_opts:
+                if len(copt) == 2 and tok.startswith(copt):
+                    return [tok[2:]]
+            i += 1
+            continue
+        break  # first bare token: a positional or the wrapped program
+    i += skip_positionals
+    rest = tokens[i:]
+    return [" ".join(rest)] if rest else []
+
+
+def _extract_flock(tokens: list[str]) -> list[str]:
+    """flock's -c/--command carries a command string and may appear after the
+    lock FILE, so scan for it anywhere before falling back to prefix-skipping
+    (options, then the single lock-FILE positional, then the wrapped command)."""
+    n = len(tokens)
+    for idx, tok in enumerate(tokens):
+        if tok in ("-c", "--command"):
+            return [tokens[idx + 1]] if idx + 1 < n else []
+        if tok.startswith("--command="):
+            return [tok.split("=", 1)[1]]
+        if tok.startswith("-c") and len(tok) > 2 and not tok.startswith("--"):
+            return [tok[2:]]
+    return _extract_wrapped_command(
+        tokens,
+        value_opts={"-w", "--wait", "--timeout", "-E", "--conflict-exit-code"},
+        skip_positionals=1,
+    )
+
+
+# Wrappers that run a program named in an argument position. Each maps to an
+# extractor returning the wrapped command string(s) to recursively validate.
+# ssh is handled separately (its arg grammar differs); find is denied on -exec.
+_COMMAND_RUNNERS = {
+    "nohup": lambda t: _extract_wrapped_command(t, value_opts=set()),
+    "setsid": lambda t: _extract_wrapped_command(t, value_opts=set()),
+    "nice": lambda t: _extract_wrapped_command(t, value_opts={"-n", "--adjustment"}),
+    "stdbuf": lambda t: _extract_wrapped_command(
+        t, value_opts={"-i", "-o", "-e", "--input", "--output", "--error"}
+    ),
+    "timeout": lambda t: _extract_wrapped_command(
+        t,
+        value_opts={"-s", "--signal", "-k", "--kill-after"},
+        skip_positionals=1,
+    ),
+    "env": lambda t: _extract_wrapped_command(
+        t,
+        value_opts={"-u", "--unset", "-C", "--chdir", "-P", "--argv0"},
+        command_opts=frozenset({"-S", "--split-string"}),
+        skip_assignments=True,
+    ),
+    "xargs": lambda t: _extract_wrapped_command(
+        t,
+        value_opts={
+            "-I", "-i", "-n", "-L", "-P", "-s", "-d", "-E", "-a",
+            "--replace", "--max-args", "--max-procs", "--max-chars",
+            "--delimiter", "--arg-file", "--eof", "--max-lines",
+        },
+    ),
+    "watch": lambda t: _extract_wrapped_command(t, value_opts={"-n", "--interval"}),
+    "flock": _extract_flock,
+}
+
+
+def _validate_command_runner(
+    program: str,
+    arg_tokens: list[str],
+    rules: dict[str, list[_CommandRule]],
+    depth: int,
+) -> tuple[bool, str]:
+    """Validate an allowlisted command-runner wrapper and its wrapped command.
+
+    Mirrors ssh: the wrapper's own args_allow/args_deny are applied first, then
+    the program it would launch is extracted and recursively validated.
+    """
+    ok, reason = _check_command_position(program, arg_tokens, rules)
+    if not ok:
+        return ok, reason
+
+    if program == "find":
+        if any(tok in _FIND_EXEC_ACTIONS for tok in arg_tokens):
+            return False, (
+                "Blocked: 'find' with -exec/-execdir/-ok/-okdir can launch "
+                "arbitrary programs and is not allowed in command-whitelist "
+                "mode.\n\n" + get_allowed_commands_message(rules)
+            )
+        return True, ""  # a plain search launches no other program
+
+    for inner in _COMMAND_RUNNERS[program](arg_tokens):
+        if not inner.strip():
+            continue
+        ok, msg = _validate(inner, rules, depth + 1)
+        if not ok:
+            return ok, msg
+    return True, ""
+
+
 def _validate(
     command: str,
     rules: dict[str, list[_CommandRule]],
@@ -355,6 +518,8 @@ def _validate(
 
         if program == "ssh" and "ssh" in rules:
             ok, msg = _validate_ssh_command(arg_tokens, rules, depth)
+        elif (program == "find" or program in _COMMAND_RUNNERS) and program in rules:
+            ok, msg = _validate_command_runner(program, arg_tokens, rules, depth)
         else:
             ok, msg = _check_command_position(program, arg_tokens, rules)
         if not ok:

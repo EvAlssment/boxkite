@@ -59,6 +59,8 @@ dependencies = [
     # dev-only (tests used it to mock the control-plane's own API), now also
     # a runtime dependency.
     "httpx>=0.27,<1",
+    # Prometheus client for the /metrics exposition (observability.py).
+    "prometheus-client>=0.20,<1",
 ]
 
 [project.optional-dependencies]

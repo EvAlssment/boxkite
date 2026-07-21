@@ -48,13 +48,16 @@ resources:
   sandboxContainer:
     cpuRequest: 25m
     memoryRequest: 64Mi
-    cpuLimit: 150m
-    memoryLimit: 128Mi
+    cpuLimit: 250m
+    memoryLimit: 256Mi
+  # The sidecar limit is the ENFORCED per-sandbox budget: agent code launched
+  # via /exec is charged to the sidecar cgroup, not the sandbox container's
+  # (see resource_config.py's module note).
   sidecarContainer:
-    cpuRequest: 50m
-    memoryRequest: 128Mi
-    cpuLimit: 500m
-    memoryLimit: 512Mi
+    cpuRequest: 100m
+    memoryRequest: 256Mi
+    cpuLimit: 1000m
+    memoryLimit: 1Gi
 
 # emptyDir sizeLimits, matching resource_config.py's
 # DEFAULT_SANDBOX_*_VOLUME_SIZE_LIMIT constants. Same "documentation, not

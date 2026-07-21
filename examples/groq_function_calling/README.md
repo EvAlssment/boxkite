@@ -35,9 +35,9 @@ to the matching `ToolSpec.handler()` by name.
 
 ```bash
 boxkite up
-export SIDECAR_AUTH_TOKEN=$(grep ^SIDECAR_AUTH_TOKEN= ~/.boxkite/local.env | cut -d= -f2)
+# SandboxManager auto-loads the sidecar token + URL from ~/.boxkite/local.env
+# (written by `boxkite up`), so no manual SIDECAR_AUTH_TOKEN export is needed.
 export RUNTIME_MODE=compose
-export SIDECAR_URL=http://localhost:8080
 export GROQ_API_KEY=...
 
 python agent.py

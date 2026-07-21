@@ -172,10 +172,10 @@ def _validate_sandbox_size(size: str) -> str:
 
 def _validate_browser_resource_floor(size: str, browser_enabled: bool) -> None:
     """docs/BROWSER-EXEC-DESIGN.md §4: a real headless Chromium process is
-    heavier than 'small''s 128Mi container memory limit can be expected to
-    absorb alongside the sidecar and whatever else the session is already
-    doing -- reject rather than silently let an agent OOM the pod the
-    first time it navigates anywhere."""
+    heavier than 'small''s ~1Gi enforced (sidecar) memory budget can be
+    expected to absorb alongside the sidecar server and whatever else the
+    session is already doing -- reject rather than silently let an agent OOM
+    the pod the first time it navigates anywhere."""
     if browser_enabled and not size_at_least(size, "medium"):
         raise ValueError(
             f"browser_enabled=True requires size='medium' or 'large' (got {size!r}) -- "
@@ -341,8 +341,16 @@ SANDBOX_SESSION_ENDPOINT_TTL_SECONDS = max(
     1, int(os.environ.get("SANDBOX_SESSION_ENDPOINT_TTL_SECONDS", "30"))
 )
 
-# Storage configuration - uses same secrets as backend/workers
-STORAGE_BACKEND = os.environ.get("STORAGE_TYPE", "azure")  # 's3' or 'azure', matches backend env var
+# Storage configuration - uses same secrets as backend/workers.
+# Read STORAGE_BACKEND (the var the control-plane/deployment actually sets and
+# the one injected into the sidecar at manager.py); fall back to the legacy
+# STORAGE_TYPE name for older self-host configs, then default. Reading only
+# STORAGE_TYPE here silently defaulted every sidecar to "azure" even when the
+# deployment set STORAGE_BACKEND=s3, breaking /configure + prefetch + workspace
+# chown (and thus str_replace) on S3/GCS deployments.
+STORAGE_BACKEND = (
+    os.environ.get("STORAGE_BACKEND") or os.environ.get("STORAGE_TYPE") or "azure"
+)  # 's3' or 'azure'
 
 
 def _get_s3_bucket() -> str:

@@ -1069,6 +1069,47 @@ test("watch raises BoxkiteApiError on an error status", async () => {
   );
 });
 
+test("streamProcessOutput yields output then exit events", async () => {
+  const client = new BoxkiteClient({
+    baseUrl: "https://cp.example.com",
+    apiKey: "bxk_live_test",
+    fetchImpl: sseFetch(
+      'event: output\ndata: {"type":"output","stdout_chunk":"hi","next_offset":2,"truncated":false}\n\n' +
+        'event: exit\ndata: {"type":"exit","status":"exited","exit_code":0}\n\n',
+    ),
+  });
+
+  const events: unknown[] = [];
+  for await (const ev of client.streamProcessOutput("sess-1", "proc-1")) {
+    events.push(ev);
+  }
+
+  assert.deepEqual(events, [
+    { type: "output", stdout_chunk: "hi", next_offset: 2, truncated: false },
+    { type: "exit", status: "exited", exit_code: 0 },
+  ]);
+});
+
+test("streamProcessOutput raises BoxkiteApiError on an error status", async () => {
+  const client = new BoxkiteClient({
+    baseUrl: "https://cp.example.com",
+    apiKey: "bxk_live_test",
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ error: { code: "not_found", message: "Process not found" } }), {
+        status: 404,
+      })) as unknown as typeof fetch,
+  });
+
+  await assert.rejects(
+    async () => {
+      for await (const _ev of client.streamProcessOutput("sess-1", "proc-1")) {
+        // draining triggers the rejection
+      }
+    },
+    (err: unknown) => err instanceof BoxkiteApiError && err.statusCode === 404,
+  );
+});
+
 test("SandboxSession wraps ls/glob/grep/getLog", async () => {
   const client = clientWith(({ url }) => {
     const path = new URL(url).pathname;

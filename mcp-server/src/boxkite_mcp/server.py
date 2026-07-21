@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import sys
+from importlib.metadata import PackageNotFoundError, version as _dist_version
 from urllib.parse import urlparse
 
 from boxkite_client import BoxkiteApiError, BoxkiteClient, BoxkiteConnectionError
@@ -84,6 +85,17 @@ def _load_config() -> tuple[str, str]:
     return base_url, api_key
 
 
+def _package_version() -> str:
+    """boxkite-mcp's own package version, so the MCP handshake's
+    serverInfo.version reports it rather than defaulting to the underlying
+    `mcp` library's version. Falls back to "0" only if the distribution
+    metadata isn't installed (e.g. an editable checkout without an install)."""
+    try:
+        return _dist_version("boxkite-mcp")
+    except PackageNotFoundError:
+        return "0"
+
+
 def _describe_api_error(action: str, exc: BoxkiteApiError) -> str:
     return f"Error {action}: {exc.message} [{exc.code}] (HTTP {exc.status_code})"
 
@@ -121,6 +133,10 @@ def build_server(client: BoxkiteClient) -> FastMCP:
             "create_sandbox's mcp_connection_names."
         ),
     )
+    # FastMCP's constructor takes no `version`, so the low-level server would
+    # otherwise report the `mcp` library's version in the MCP handshake's
+    # serverInfo. Pin it to this package's own version instead.
+    mcp._mcp_server.version = _package_version()
 
     @mcp.tool()
     def create_sandbox(

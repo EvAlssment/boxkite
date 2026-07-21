@@ -828,6 +828,30 @@ class BoxkiteClient:
             "GET", f"/v1/sandboxes/{session_id}/processes/{process_id}/output", params=params
         )
 
+    def stream_process_output(
+        self, session_id: str, process_id: str, *, since_offset: int = 0
+    ) -> Iterator[dict]:
+        """GET /v1/sandboxes/{session_id}/processes/{process_id}/stream -- live
+        SSE stream of a background process's stdout, the streaming counterpart
+        to `get_process_output`'s polling. Yields one dict per event:
+        `{"type": "output", "stdout_chunk", "next_offset", "truncated"}` for
+        each new chunk, then a final `{"type": "exit", "status", "exit_code"}`
+        when the process finishes.
+
+        Blocks the calling thread while the stream is open; iterate it from a
+        dedicated thread if you need this alongside other work.
+        """
+        params: dict[str, Any] = {"since_offset": since_offset}
+        with self._http.stream(
+            "GET",
+            f"/v1/sandboxes/{session_id}/processes/{process_id}/stream",
+            params=params,
+        ) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                _raise_for_error(resp)
+            yield from _iter_sse_events(resp.iter_lines())
+
     def send_process_input(self, session_id: str, process_id: str, data: str) -> dict:
         """POST /v1/sandboxes/{session_id}/processes/{process_id}/input --
         write to a tracked background process's stdin pipe."""
@@ -1635,6 +1659,24 @@ class AsyncBoxkiteClient:
         """POST /v1/sandboxes/{session_id}/processes/{process_id}/stop --
         stop a tracked background process."""
         return await self._request("POST", f"/v1/sandboxes/{session_id}/processes/{process_id}/stop")
+
+    async def stream_process_output(
+        self, session_id: str, process_id: str, *, since_offset: int = 0
+    ) -> AsyncIterator[dict]:
+        """GET /v1/sandboxes/{session_id}/processes/{process_id}/stream -- async
+        counterpart of `BoxkiteClient.stream_process_output`. See that
+        docstring for the event contract."""
+        params: dict[str, Any] = {"since_offset": since_offset}
+        async with self._http.stream(
+            "GET",
+            f"/v1/sandboxes/{session_id}/processes/{process_id}/stream",
+            params=params,
+        ) as resp:
+            if resp.status_code >= 400:
+                await resp.aread()
+                _raise_for_error(resp)
+            async for event in _aiter_sse_events(resp.aiter_lines()):
+                yield event
 
     async def watch(self, session_id: str) -> AsyncIterator[dict]:
         """GET /v1/sandboxes/{session_id}/watch -- async counterpart of

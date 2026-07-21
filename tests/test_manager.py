@@ -237,9 +237,28 @@ def test_sandbox_resource_defaults_are_quota_friendly(monkeypatch):
     sidecar_resources = build_sidecar_container_resources()
 
     assert sandbox_resources.requests == {"cpu": "25m", "memory": "64Mi"}
-    assert sandbox_resources.limits == {"cpu": "150m", "memory": "128Mi"}
-    assert sidecar_resources.requests == {"cpu": "50m", "memory": "128Mi"}
-    assert sidecar_resources.limits == {"cpu": "500m", "memory": "512Mi"}
+    assert sandbox_resources.limits == {"cpu": "250m", "memory": "256Mi"}
+    assert sidecar_resources.requests == {"cpu": "100m", "memory": "256Mi"}
+    assert sidecar_resources.limits == {"cpu": "1000m", "memory": "1Gi"}
+
+
+def test_medium_and_large_provide_gb_scale_enforced_memory(monkeypatch):
+    """The enforced per-sandbox memory budget is the SIDECAR container limit
+    (agent code runs charged to the sidecar cgroup, not the sandbox cgroup --
+    see resource_config's module note). medium/large must therefore expose
+    GB-scale *sidecar* memory limits, scaling up with size."""
+    _clear_sandbox_resource_env(monkeypatch)
+
+    small = build_sidecar_container_resources(size="small")
+    medium = build_sidecar_container_resources(size="medium")
+    large = build_sidecar_container_resources(size="large")
+
+    assert small.limits["memory"] == "1Gi"
+    assert medium.limits["memory"] == "2Gi"
+    assert large.limits["memory"] == "4Gi"
+    # CPU scales alongside memory.
+    assert medium.limits["cpu"] == "2000m"
+    assert large.limits["cpu"] == "4000m"
 
 
 def test_sandbox_resources_use_env_overrides(monkeypatch):
@@ -383,6 +402,57 @@ async def test_warm_pool_pod_uses_configured_resources(monkeypatch):
     assert sandbox.resources.limits == {"cpu": "1200m", "memory": "3Gi"}
     assert sidecar.resources.requests == {"cpu": "75m", "memory": "96Mi"}
     assert sidecar.resources.limits == {"cpu": "300m", "memory": "384Mi"}
+
+
+@pytest.mark.asyncio
+async def test_schedule_replenish_runs_once_and_dedupes():
+    """Request-driven replenish (fix for warm-pool starvation under a
+    CPU-throttling serverless runtime): a single in-flight top-up runs, and
+    concurrent nudges don't stack overlapping scans."""
+    manager = WarmPoolManager()
+    manager._k8s_core_api = _FakeCoreApi()
+    manager._running = True
+
+    calls = {"n": 0}
+    release = asyncio.Event()
+
+    async def fake_replenish():
+        calls["n"] += 1
+        await release.wait()
+
+    manager._replenish = fake_replenish  # type: ignore[assignment]
+
+    manager.schedule_replenish()
+    manager.schedule_replenish()  # deduped while the first is still in flight
+    await asyncio.sleep(0)
+    assert calls["n"] == 1
+
+    release.set()
+    await manager._manual_replenish_task
+    assert calls["n"] == 1
+
+    # A fresh nudge after the previous one finished runs again.
+    release2 = asyncio.Event()
+
+    async def fake_replenish_2():
+        calls["n"] += 1
+        await release2.wait()
+
+    manager._replenish = fake_replenish_2  # type: ignore[assignment]
+    manager.schedule_replenish()
+    await asyncio.sleep(0)
+    assert calls["n"] == 2
+    release2.set()
+    await manager._manual_replenish_task
+
+
+@pytest.mark.asyncio
+async def test_schedule_replenish_noop_when_not_running():
+    manager = WarmPoolManager()
+    manager._k8s_core_api = _FakeCoreApi()
+    manager._running = False
+    manager.schedule_replenish()
+    assert manager._manual_replenish_task is None
 
 
 @pytest.mark.asyncio

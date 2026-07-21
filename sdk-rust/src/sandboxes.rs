@@ -176,7 +176,7 @@ pub struct Sandbox {
     pub label: Option<String>,
     pub created_at: String,
     pub destroyed_at: Option<String>,
-    pub expires_at: String,
+    pub expires_at: Option<String>,
     pub connect: Option<SandboxConnectInfo>,
     pub usage: Option<UsageSummary>,
 }

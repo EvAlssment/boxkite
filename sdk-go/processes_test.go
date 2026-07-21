@@ -1,6 +1,7 @@
 package boxkite
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -138,5 +139,65 @@ func TestStopProcess(t *testing.T) {
 	}
 	if result.Status != "stopped" || result.ExitCode == nil || *result.ExitCode != 143 {
 		t.Errorf("unexpected result: %+v", result)
+	}
+}
+
+func TestStreamProcessOutput_YieldsOutputThenExit(t *testing.T) {
+	client, closeServer := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sandboxes/sess-1/processes/proc-1/stream" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("since_offset") != "0" {
+			t.Errorf("unexpected since_offset: %s", r.URL.Query().Get("since_offset"))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fw := bufio.NewWriter(w)
+		_, _ = fw.WriteString("event: output\ndata: {\"type\": \"output\", \"stdout_chunk\": \"hi\", \"next_offset\": 2, \"truncated\": false}\n\n")
+		_, _ = fw.WriteString("event: exit\ndata: {\"type\": \"exit\", \"status\": \"exited\", \"exit_code\": 0}\n\n")
+		_ = fw.Flush()
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	})
+	defer closeServer()
+
+	stream, err := client.StreamProcessOutput(context.Background(), "sess-1", "proc-1", 0)
+	if err != nil {
+		t.Fatalf("StreamProcessOutput: %v", err)
+	}
+	defer stream.Close()
+
+	var events []ProcessStreamEvent
+	for stream.Next() {
+		events = append(events, stream.Event())
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream.Err(): %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].Type != "output" || events[0].StdoutChunk != "hi" || events[0].NextOffset != 2 {
+		t.Errorf("unexpected first event: %+v", events[0])
+	}
+	if events[1].Type != "exit" || events[1].Status != "exited" || events[1].ExitCode == nil || *events[1].ExitCode != 0 {
+		t.Errorf("unexpected second event: %+v", events[1])
+	}
+}
+
+func TestStreamProcessOutput_NotFoundMapsToAPIError(t *testing.T) {
+	client, closeServer := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, 404, `{"error": {"code": "not_found", "message": "Process not found"}}`)
+	})
+	defer closeServer()
+
+	_, err := client.StreamProcessOutput(context.Background(), "sess-1", "proc-missing", 0)
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.Code != "not_found" {
+		t.Errorf("unexpected code: %s", apiErr.Code)
 	}
 }

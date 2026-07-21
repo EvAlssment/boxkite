@@ -108,8 +108,13 @@ REAPER_HEALTH_TIMEOUT = 5  # seconds to wait for /health response
 REAPER_FLUSH_TIMEOUT = int(os.environ.get("SANDBOX_REAPER_FLUSH_TIMEOUT", "60"))
 REAPER_DELETE_ON_FLUSH_FAILURE = os.environ.get("SANDBOX_REAPER_DELETE_ON_FLUSH_FAILURE", "true").lower() == "true"
 
-# Storage configuration - uses same secrets as backend/workers
-STORAGE_BACKEND = os.environ.get("STORAGE_TYPE", "azure")  # 's3' or 'azure', matches backend env var
+# Storage configuration - uses same secrets as backend/workers.
+# Read STORAGE_BACKEND first (the var the deployment actually sets); fall back to
+# the legacy STORAGE_TYPE name, then default. See _manager_config.py for why
+# reading STORAGE_TYPE alone silently mis-defaulted warm pods to "azure".
+STORAGE_BACKEND = (
+    os.environ.get("STORAGE_BACKEND") or os.environ.get("STORAGE_TYPE") or "azure"
+)  # 's3' or 'azure'
 
 
 def _get_s3_bucket() -> str:
@@ -228,6 +233,10 @@ class WarmPoolManager:
         self._k8s_init_lock = asyncio.Lock()
         self._replenish_task: Optional[asyncio.Task] = None
         self._reaper_task: Optional[asyncio.Task] = None
+        # Request-driven replenish (see schedule_replenish): a single in-flight
+        # top-up task, deduplicated so a burst of claims doesn't spawn N
+        # overlapping scans.
+        self._manual_replenish_task: Optional[asyncio.Task] = None
         self._running = False
         self._lifecycle_lock = asyncio.Lock()
 
@@ -281,9 +290,14 @@ class WarmPoolManager:
         """Stop background tasks (idempotent)."""
         async with self._lifecycle_lock:
             self._running = False
-            tasks = [task for task in (self._replenish_task, self._reaper_task) if task]
+            tasks = [
+                task
+                for task in (self._replenish_task, self._reaper_task, self._manual_replenish_task)
+                if task
+            ]
             self._replenish_task = None
             self._reaper_task = None
+            self._manual_replenish_task = None
 
         for task in tasks:
             task.cancel()
@@ -865,6 +879,38 @@ class WarmPoolManager:
             except Exception as e:
                 logger.error(f"[WarmPool] Replenish error: {e}")
             await asyncio.sleep(WARM_POOL_REPLENISH_INTERVAL)
+
+    def schedule_replenish(self) -> None:
+        """Kick a single best-effort replenish pass from the request path.
+
+        The timer-driven `_replenish_loop` relies on `asyncio.sleep` firing on
+        schedule. Under a serverless runtime that CPU-throttles the container
+        between requests (e.g. Cloud Run without `--no-cpu-throttling` or a
+        warm min-instance), those sleeps stall, so the pool is never topped
+        back up after a claim drains it and every subsequent create falls
+        through to a slow cold pod. Calling this from the create path makes
+        the pool self-heal whenever there is traffic: replenishment makes
+        progress while an instance is actively serving requests, independent
+        of the timer.
+
+        Non-blocking and deduplicated -- it never awaits pod creation (that
+        would add ~pod-startup latency to the caller's request) and never
+        stacks a second scan while one is already in flight. The underlying
+        `_replenish` is itself bounded by WARM_POOL_MAX, so repeated nudges
+        can't over-create.
+        """
+        if not self._running or not self._k8s_core_api:
+            return
+        existing = self._manual_replenish_task
+        if existing is not None and not existing.done():
+            return
+        self._manual_replenish_task = asyncio.create_task(self._run_manual_replenish())
+
+    async def _run_manual_replenish(self) -> None:
+        try:
+            await self._replenish()
+        except Exception as e:
+            logger.error(f"[WarmPool] Request-driven replenish error: {e}")
 
     async def _scan_pool_state(self) -> tuple[dict[str, int], int, dict[str, int], list[str]]:
         """Scan all sandbox pods and classify them.

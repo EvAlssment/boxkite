@@ -583,9 +583,20 @@ async def str_replace(req: main.StrReplaceRequest):
         full_path = main._revalidate_path_or_400(full_path)
         async with aiofiles.open(full_path, 'w') as f:
             await f.write(new_content)
-            # Preserve ownership for sandbox user via the open fd, avoiding a
-            # further path-based race between the write and the chown.
-            os.fchown(f.fileno(), main.SANDBOX_UID, main.SANDBOX_GID)
+            # Best-effort ownership re-assert via the open fd. Unlike
+            # file_create (which hands a brand-new root-owned file to the
+            # sandbox user, so its chown is load-bearing), str_replace edits a
+            # file that already exists via an in-place 'w' open that preserves
+            # the inode's existing ownership -- so this fchown is redundant for
+            # correctness. It must NEVER fail the whole edit: the content write
+            # has already succeeded, and an environment where the sidecar can't
+            # chown to SANDBOX_UID (not root / no CAP_CHOWN / restricted fs)
+            # would otherwise turn every str_replace into a 500 -> 502 even
+            # though the file was edited on disk.
+            try:
+                os.fchown(f.fileno(), main.SANDBOX_UID, main.SANDBOX_GID)
+            except OSError as chown_err:
+                logger.warning(f"[str-replace] Skipped ownership re-assert on {full_path}: {chown_err}")
 
         if main._storage_bucket_for_virtual_path(virtual_path) is not None:
             main.pending_sync_files.add(virtual_path)

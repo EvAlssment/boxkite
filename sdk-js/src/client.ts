@@ -45,6 +45,7 @@ import type {
   ProcessOutputResult,
   ProcessStartResult,
   ProcessStopResult,
+  ProcessStreamEvent,
   Sandbox,
   Secret,
   StrReplaceResult,
@@ -735,6 +736,42 @@ export class BoxkiteClient {
   ): Promise<ProcessOutputResult> {
     const params: Record<string, string> = { since_offset: String(options?.sinceOffset ?? 0) };
     return this.request("GET", `/v1/sandboxes/${sessionId}/processes/${processId}/output`, undefined, params);
+  }
+
+  /**
+   * GET /v1/sandboxes/{sessionId}/processes/{processId}/stream -- live SSE
+   * stream of a background process's stdout, the streaming counterpart to
+   * `getProcessOutput`'s polling. Yields one event per SSE `data:` line: an
+   * `{ type: "output", ... }` per new chunk, then a terminal
+   * `{ type: "exit", ... }` when the process finishes.
+   *
+   * `break`ing out of a `for await` loop over it (or calling `.return()`)
+   * closes the underlying stream.
+   */
+  async *streamProcessOutput(
+    sessionId: string,
+    processId: string,
+    options?: GetProcessOutputOptions,
+  ): AsyncGenerator<ProcessStreamEvent> {
+    const sinceOffset = String(options?.sinceOffset ?? 0);
+    const url = `${this.baseUrl}/v1/sandboxes/${sessionId}/processes/${processId}/stream?since_offset=${sinceOffset}`;
+    let resp: Response;
+    try {
+      resp = await this.fetchImpl(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+      });
+    } catch (err) {
+      throw new BoxkiteConnectionError(err instanceof Error ? err.message : String(err));
+    }
+    if (!resp.ok) {
+      const { code, message } = await parseErrorBody(resp);
+      throw new BoxkiteApiError(resp.status, code, message);
+    }
+    if (!resp.body) {
+      throw new BoxkiteConnectionError("stream response had no body to stream");
+    }
+    yield* parseSseEvents(readBodyAsText(resp.body)) as AsyncGenerator<ProcessStreamEvent>;
   }
 
   /** POST /v1/sandboxes/{sessionId}/processes/{processId}/input -- write to

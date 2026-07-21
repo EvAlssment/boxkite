@@ -11,7 +11,11 @@
 //! route comments mark SSE/streaming process output as a separate, later
 //! phase, not part of this route set.
 
+use std::pin::Pin;
+
+use futures_util::{Stream, StreamExt};
 use reqwest::Method;
+use reqwest_eventsource::{Event, EventSource};
 use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
@@ -117,6 +121,23 @@ pub struct ProcessOutputResult {
     pub exit_code: Option<i32>,
 }
 
+/// One event from `GET /v1/sandboxes/{id}/processes/{process_id}/stream`: an
+/// [`Output`](ProcessStreamEvent::Output) per new stdout chunk, then a
+/// terminal [`Exit`](ProcessStreamEvent::Exit) once the process finishes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ProcessStreamEvent {
+    Output {
+        stdout_chunk: String,
+        next_offset: i64,
+        truncated: bool,
+    },
+    Exit {
+        status: String,
+        exit_code: Option<i32>,
+    },
+}
+
 /// `POST /v1/sandboxes/{id}/processes/{process_id}/input`'s response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProcessInputResult {
@@ -189,6 +210,57 @@ impl Client {
             )
             .query(&[("since_offset", since_offset.to_string())]);
         self.send(builder).await
+    }
+
+    /// `GET /v1/sandboxes/{session_id}/processes/{process_id}/stream` -- live
+    /// SSE stream of a background process's stdout, the streaming counterpart
+    /// to [`get_process_output`](Client::get_process_output). Yields an
+    /// [`ProcessStreamEvent::Output`] per new chunk, then a terminal
+    /// [`ProcessStreamEvent::Exit`]. Bring `futures_util::StreamExt` into
+    /// scope to consume it; the stream ends when the process finishes, the
+    /// session is destroyed, or the caller drops it.
+    pub fn stream_process_output(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        since_offset: i64,
+    ) -> Pin<Box<dyn Stream<Item = Result<ProcessStreamEvent, BoxkiteError>> + Send + 'static>> {
+        let request_builder = self
+            .request(
+                Method::GET,
+                &format!("/v1/sandboxes/{session_id}/processes/{process_id}/stream"),
+            )
+            .query(&[("since_offset", since_offset.to_string())]);
+
+        Box::pin(async_stream::stream! {
+            let mut event_source = match EventSource::new(request_builder) {
+                Ok(event_source) => event_source,
+                Err(err) => {
+                    yield Err(BoxkiteError::Config(format!("failed to build stream request: {err}")));
+                    return;
+                }
+            };
+
+            while let Some(event) = event_source.next().await {
+                match event {
+                    Ok(Event::Open) => continue,
+                    Ok(Event::Message(message)) => {
+                        yield serde_json::from_str::<ProcessStreamEvent>(&message.data).map_err(BoxkiteError::from);
+                    }
+                    Err(reqwest_eventsource::Error::StreamEnded) => break,
+                    Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {
+                        let bytes = response.bytes().await.unwrap_or_default();
+                        yield Err(crate::error::api_error_from_bytes(status.as_u16(), &bytes));
+                        break;
+                    }
+                    Err(err) => {
+                        yield Err(BoxkiteError::from(err));
+                        break;
+                    }
+                }
+            }
+            event_source.close();
+        })
     }
 
     /// `POST /v1/sandboxes/{session_id}/processes/{process_id}/input` --

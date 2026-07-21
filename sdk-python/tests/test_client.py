@@ -1065,6 +1065,32 @@ def test_watch_raises_on_error_status():
     assert exc_info.value.status_code == 404
 
 
+def test_stream_process_output_yields_output_then_exit():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/sandboxes/sess-1/processes/proc-1/stream"
+        assert request.url.params.get("since_offset") == "0"
+        body = (
+            b'event: output\ndata: {"type": "output", "stdout_chunk": "hello", "next_offset": 5}\n\n'
+            b'event: exit\ndata: {"type": "exit", "status": "exited", "exit_code": 0}\n\n'
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    client = _client_with(handler)
+    events = list(client.stream_process_output("sess-1", "proc-1"))
+    assert events[0] == {"type": "output", "stdout_chunk": "hello", "next_offset": 5}
+    assert events[-1] == {"type": "exit", "status": "exited", "exit_code": 0}
+
+
+def test_stream_process_output_raises_on_error_status():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "Process not found"}})
+
+    client = _client_with(handler)
+    with pytest.raises(BoxkiteApiError) as exc_info:
+        list(client.stream_process_output("sess-1", "proc-1"))
+    assert exc_info.value.status_code == 404
+
+
 def test_start_process_posts_command_and_max_runtime():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/sandboxes/sess-1/processes"

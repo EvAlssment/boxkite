@@ -183,3 +183,70 @@ async fn get_process_output_maps_unknown_process_id_to_404() {
     assert_eq!(err.code(), Some("not_found"));
     assert_eq!(err.status(), Some(404));
 }
+
+#[tokio::test]
+async fn stream_process_output_yields_output_then_exit() {
+    use futures_util::StreamExt;
+    use boxkite_client::ProcessStreamEvent;
+
+    let server = common::mock_server().await;
+    let client = common::client_for(&server);
+
+    let body = concat!(
+        "event: output\n",
+        "data: {\"type\":\"output\",\"stdout_chunk\":\"hi\",\"next_offset\":2,\"truncated\":false}\n\n",
+        "event: exit\n",
+        "data: {\"type\":\"exit\",\"status\":\"exited\",\"exit_code\":0}\n\n",
+    );
+
+    Mock::given(method("GET"))
+        .and(path("/v1/sandboxes/sess-1/processes/proc-1/stream"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_raw(body, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let mut stream = client.stream_process_output("sess-1", "proc-1", 0);
+    let first = stream.next().await.expect("first event").expect("first ok");
+    match first {
+        ProcessStreamEvent::Output { stdout_chunk, next_offset, truncated } => {
+            assert_eq!(stdout_chunk, "hi");
+            assert_eq!(next_offset, 2);
+            assert!(!truncated);
+        }
+        other => panic!("expected Output, got {other:?}"),
+    }
+    let second = stream.next().await.expect("second event").expect("second ok");
+    match second {
+        ProcessStreamEvent::Exit { status, exit_code } => {
+            assert_eq!(status, "exited");
+            assert_eq!(exit_code, Some(0));
+        }
+        other => panic!("expected Exit, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn stream_process_output_maps_404_before_streaming() {
+    use futures_util::StreamExt;
+
+    let server = common::mock_server().await;
+    let client = common::client_for(&server);
+
+    Mock::given(method("GET"))
+        .and(path("/v1/sandboxes/sess-1/processes/missing/stream"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": {"code": "not_found", "message": "Process not found"}
+        })))
+        .mount(&server)
+        .await;
+
+    let mut stream = client.stream_process_output("sess-1", "missing", 0);
+    let first = stream.next().await.expect("stream should yield an error");
+    let err = first.unwrap_err();
+    assert_eq!(err.code(), Some("not_found"));
+    assert_eq!(err.status(), Some(404));
+}

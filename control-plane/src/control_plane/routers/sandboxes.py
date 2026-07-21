@@ -143,6 +143,15 @@ router = APIRouter(prefix="/v1/sandboxes", tags=["sandboxes"])
 SANDBOX_WATCH_POLL_INTERVAL_SECONDS = 0.5
 SANDBOX_WATCH_BATCH_LIMIT = 100
 
+# GET .../processes/{id}/stream -- a poll-to-SSE bridge turning
+# get_process_output's offset polling into a live stdout stream. Same
+# "simple poll loop, don't over-engineer" posture as the watch stream above;
+# no sidecar changes required.
+SANDBOX_PROCESS_STREAM_POLL_INTERVAL_SECONDS = 0.5
+# Emit an SSE keep-alive comment after this many consecutive idle polls
+# (~15s) so intermediary proxies don't drop a quiet long-running stream.
+SANDBOX_PROCESS_STREAM_HEARTBEAT_EVERY = 30
+
 # ── Human takeover (WS proxy) ────────────────────────────────────────────
 # How often the /takeover proxy flushes a snapshot of what the human typed
 # to ExecLogEntry while a session is open, independent of the mandatory
@@ -1278,6 +1287,112 @@ async def get_process_output_in_sandbox(
     except Exception as exc:
         raise _sandbox_operation_error("get_process_output", exc) from exc
     return SandboxProcessOutputResponse(**result)
+
+
+def _process_output_sse_event(result: dict) -> str:
+    # `type` is carried in the data payload too (not just the SSE `event:`
+    # line) so header-less parsers -- e.g. the SDK's data-only SSE reader --
+    # can still distinguish output from the terminal exit event.
+    payload = {
+        "type": "output",
+        "stdout_chunk": result.get("stdout_chunk", ""),
+        "next_offset": result.get("next_offset", 0),
+        "truncated": result.get("truncated", False),
+    }
+    return f"event: output\ndata: {json.dumps(payload)}\n\n"
+
+
+def _process_exit_sse_event(result: dict) -> str:
+    payload = {"type": "exit", "status": result.get("status"), "exit_code": result.get("exit_code")}
+    return f"event: exit\ndata: {json.dumps(payload)}\n\n"
+
+
+async def _process_output_stream(
+    request: Request,
+    manager,
+    *,
+    session_id: str,
+    process_id: str,
+    first_result: dict,
+    start_offset: int,
+):
+    """Turn get_process_output's offset polling into an SSE stream: emit each
+    new stdout chunk as an `output` event, then a final `exit` event once the
+    process is no longer running. Ends immediately if the client disconnects."""
+    result = first_result
+    offset = start_offset
+    idle = 0
+    while True:
+        if await request.is_disconnected():
+            return
+        chunk = result.get("stdout_chunk") or ""
+        if chunk:
+            offset = result.get("next_offset", offset)
+            yield _process_output_sse_event(result)
+            idle = 0
+        else:
+            idle += 1
+            if idle % SANDBOX_PROCESS_STREAM_HEARTBEAT_EVERY == 0:
+                yield ": keep-alive\n\n"
+        if result.get("status") != "running":
+            yield _process_exit_sse_event(result)
+            return
+        await asyncio.sleep(SANDBOX_PROCESS_STREAM_POLL_INTERVAL_SECONDS)
+        try:
+            result = await manager.get_process_output(
+                session_id=session_id, process_id=process_id, since_offset=offset
+            )
+        except Exception:
+            # Session/process went away mid-stream (reaped, deleted); end cleanly.
+            return
+
+
+@router.get(
+    "/{session_id}/processes/{process_id}/stream",
+    summary="Live SSE stream of a background process's stdout",
+    description=(
+        "Server-Sent Events stream of a background process's output: each new "
+        "chunk arrives as an `output` event, and an `exit` event (with the "
+        "exit_code) is sent once the process finishes. A control-plane-side "
+        "poll-to-stream bridge over SandboxManager.get_process_output -- the "
+        "live alternative to polling GET .../output yourself. Accepts the API "
+        "key as a header or, for browser EventSource clients that cannot set "
+        "one, an `?api_key=` query parameter (same as GET .../watch). 404s for "
+        "a session owned by a different account or an unknown process_id."
+    ),
+)
+async def stream_process_output_in_sandbox(
+    request: Request,
+    session_id: str = Path(...),
+    process_id: str = Path(...),
+    since_offset: int = Query(default=0, ge=0),
+    account: Account = Depends(get_current_account_via_api_key_or_query),
+    db: AsyncSession = Depends(get_db),
+    manager=Depends(get_manager),
+) -> StreamingResponse:
+    await _get_active_session_or_404(session_id=session_id, account=account, db=db)
+    # Resolve the process once up front so an unknown process_id is a clean 404
+    # rather than an error surfaced mid-stream after headers are sent.
+    try:
+        first_result = await manager.get_process_output(
+            session_id=session_id, process_id=process_id, since_offset=since_offset
+        )
+    except ValueError as exc:
+        raise ApiError(404, "not_found", "Process not found") from exc
+    except Exception as exc:
+        raise _sandbox_operation_error("get_process_output", exc) from exc
+    return StreamingResponse(
+        _process_output_stream(
+            request,
+            manager,
+            session_id=session_id,
+            process_id=process_id,
+            first_result=first_result,
+            start_offset=since_offset,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post(

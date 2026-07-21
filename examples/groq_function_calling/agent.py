@@ -22,9 +22,11 @@ Prerequisites:
 
 Run:
     export GROQ_API_KEY=...
-    export SIDECAR_AUTH_TOKEN=$(grep ^SIDECAR_AUTH_TOKEN= ~/.boxkite/local.env | cut -d= -f2)
-    export RUNTIME_MODE=compose SIDECAR_URL=http://localhost:8080
+    export RUNTIME_MODE=compose
     python agent.py
+
+  (SandboxManager auto-loads the sidecar token + URL from
+  ~/.boxkite/local.env, written by `boxkite up` — no manual export needed.)
 """
 
 from __future__ import annotations

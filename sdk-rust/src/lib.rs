@@ -101,7 +101,7 @@ pub use mcp_connections::{McpCatalogId, McpConnection};
 pub use preview::{PreviewRevokeResult, PreviewUrl};
 pub use processes::{
     ProcessInfo, ProcessInputResult, ProcessListResult, ProcessOutputResult, ProcessStartResult,
-    ProcessStopResult, StartProcessOptions,
+    ProcessStopResult, ProcessStreamEvent, StartProcessOptions,
 };
 pub use sandboxes::{CreateSandboxOptions, Sandbox, SandboxConnectInfo, SandboxSize, UsageSummary};
 pub use secrets::{CreateSecretOptions, Secret};

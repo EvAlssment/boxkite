@@ -27,22 +27,41 @@ SANDBOX_MAX_VOLUME_SIZE_LIMIT_GI_ENV = "SANDBOX_MAX_VOLUME_SIZE_LIMIT_GI"
 SANDBOX_MAX_ACTIVE_DEADLINE_SECONDS_ENV = "SANDBOX_MAX_ACTIVE_DEADLINE_SECONDS"
 
 
-# Current execution is sidecar-launched: `/exec` starts commands from the
-# sidecar, enters the sandbox mount/PID namespaces, and drops to the sandbox
-# UID/GID. That gives user code the sandbox filesystem/tooling image, but the
-# process is still charged to the sidecar container cgroup. Until execution is
-# moved into the sandbox container's cgroup, the sidecar needs the larger CPU
-# and memory budget; the sandbox container mostly acts as the namespace and
-# filesystem target.
+# WHERE AN AGENT'S CODE IS ACTUALLY CHARGED (memory-limit enforcement).
+#
+# Execution is sidecar-launched: `/exec` starts commands from the sidecar,
+# enters the sandbox mount/PID namespaces via nsenter, and drops to the
+# sandbox UID/GID. That gives user code the sandbox filesystem/tooling image
+# and the *appearance* of the sandbox container's cgroup -- a process that
+# reads /sys/fs/cgroup/memory.max sees the SANDBOX container's value -- but
+# the process's real cgroup accounting stays with the SIDECAR container
+# (nsenter changes namespaces, not cgroup membership). Verified against the
+# live cluster: a "small" sandbox (sandbox cgroup 128Mi, sidecar cgroup
+# 512Mi) allocated 400MB fine and only OOM-killed at ~700MB -- i.e. bound by
+# the 512Mi SIDECAR limit, NOT the 128Mi sandbox limit the process reads.
+#
+# Consequence: the SIDECAR container's memory/CPU limit IS the enforced,
+# usable per-sandbox budget for agent code. So the per-size budget below is
+# carried on the sidecar (that's what OOM-kills runaway code), and the
+# sandbox container keeps only a modest floor for its namespace-holding
+# `tail -f /dev/null` PID1. Moving enforcement onto the sandbox container's
+# own cgroup would require the sidecar-owned exec path to migrate the exec'd
+# process into the sandbox cgroup (nsenter --cgroup + a cgroup write); until
+# that lands, sizing the sidecar is the only real lever. Reserve ~128-256Mi
+# of the sidecar budget for the sidecar server itself (uvicorn + flush
+# buffers) -- the remainder is what agent code can use before OOM.
 DEFAULT_SANDBOX_CONTAINER_CPU_REQUEST = "25m"
 DEFAULT_SANDBOX_CONTAINER_MEMORY_REQUEST = "64Mi"
-DEFAULT_SANDBOX_CONTAINER_CPU_LIMIT = "150m"
-DEFAULT_SANDBOX_CONTAINER_MEMORY_LIMIT = "128Mi"
+DEFAULT_SANDBOX_CONTAINER_CPU_LIMIT = "250m"
+DEFAULT_SANDBOX_CONTAINER_MEMORY_LIMIT = "256Mi"
 
-DEFAULT_SANDBOX_SIDECAR_CPU_REQUEST = "50m"
-DEFAULT_SANDBOX_SIDECAR_MEMORY_REQUEST = "128Mi"
-DEFAULT_SANDBOX_SIDECAR_CPU_LIMIT = "500m"
-DEFAULT_SANDBOX_SIDECAR_MEMORY_LIMIT = "512Mi"
+# "small" enforced (usable) budget: ~1Gi memory / 1 CPU, carried on the
+# sidecar per the note above. 512Mi was unrealistically tight for real agent
+# workloads (a pip install + a language runtime routinely exceeds it).
+DEFAULT_SANDBOX_SIDECAR_CPU_REQUEST = "100m"
+DEFAULT_SANDBOX_SIDECAR_MEMORY_REQUEST = "256Mi"
+DEFAULT_SANDBOX_SIDECAR_CPU_LIMIT = "1000m"
+DEFAULT_SANDBOX_SIDECAR_MEMORY_LIMIT = "1Gi"
 
 # Matches deploy/pod-template.yaml (see test_pod_template_parity.py). Without
 # an explicit sizeLimit, an emptyDir volume is bounded only by the node's
@@ -96,25 +115,29 @@ SANDBOX_SIZE_PRESETS: dict[str, SandboxSizeSpec] = {
         sidecar_cpu_limit=DEFAULT_SANDBOX_SIDECAR_CPU_LIMIT,
         sidecar_memory_limit=DEFAULT_SANDBOX_SIDECAR_MEMORY_LIMIT,
     ),
+    # "medium"/"large" enforced (usable) memory is the SIDECAR limit (2Gi /
+    # 4Gi) -- that's the cgroup agent code actually runs in (see the module
+    # note above). The sandbox container keeps only a modest namespace-holder
+    # floor, so a "medium" pod reserves ~2.5Gi total, not double-counted GBs.
     "medium": SandboxSizeSpec(
-        container_cpu_request="100m",
-        container_memory_request="256Mi",
+        container_cpu_request="50m",
+        container_memory_request="128Mi",
         container_cpu_limit="500m",
         container_memory_limit="512Mi",
-        sidecar_cpu_request="100m",
-        sidecar_memory_request="256Mi",
-        sidecar_cpu_limit="1000m",
-        sidecar_memory_limit="1Gi",
-    ),
-    "large": SandboxSizeSpec(
-        container_cpu_request="250m",
-        container_memory_request="512Mi",
-        container_cpu_limit="1000m",
-        container_memory_limit="1Gi",
         sidecar_cpu_request="250m",
         sidecar_memory_request="512Mi",
         sidecar_cpu_limit="2000m",
         sidecar_memory_limit="2Gi",
+    ),
+    "large": SandboxSizeSpec(
+        container_cpu_request="100m",
+        container_memory_request="256Mi",
+        container_cpu_limit="1000m",
+        container_memory_limit="1Gi",
+        sidecar_cpu_request="500m",
+        sidecar_memory_request="1Gi",
+        sidecar_cpu_limit="4000m",
+        sidecar_memory_limit="4Gi",
     ),
 }
 

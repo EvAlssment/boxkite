@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     # regardless of ENVIRONMENT.
     ENABLE_API_DOCS: bool | None = None
 
+    # ── Observability ────────────────────────────────────────────────────
+    # Prometheus exposition at GET /metrics (request counts + latency
+    # histogram). On by default; 404s when disabled, same opt-out convention
+    # as ENABLE_API_DOCS. Labels use matched route *templates*, so cardinality
+    # stays bounded, but operators fronting a public ingress should still scope
+    # /metrics to their scrape network.
+    BOXKITE_METRICS_ENABLED: bool = True
+    # Emit logs as structured JSON. None (default) = auto: JSON in a real
+    # deployment, human-readable text in a dev/test ENVIRONMENT. Set explicitly
+    # to force either format.
+    BOXKITE_JSON_LOGS: bool | None = None
+
     # ── Auth ─────────────────────────────────────────────────────────────
     # No default in any real deployment: startup fails fast if this is left
     # at the placeholder value while ENVIRONMENT is not one of the dev/test
@@ -95,6 +107,11 @@ class Settings(BaseSettings):
     # greppable in logs/history and instantly identifiable as a boxkite
     # control-plane credential.
     API_KEY_PREFIX: str = "bxk_live"
+
+    # How long an organization invite token stays redeemable (org/team,
+    # issue #225). One week by default -- long enough to be practical,
+    # short enough that a leaked invite link doesn't linger indefinitely.
+    BOXKITE_ORG_INVITE_TTL_HOURS: int = 168
 
     # ── MCP OAuth 2.1 (docs/MCP-OAUTH-AND-SOCIAL-LOGIN-DESIGN.md) ────────
     # Default-enabled following the dedicated security review GitHub issue
@@ -404,6 +421,14 @@ class Settings(BaseSettings):
     # generated instead -- see LocalDevSecretsKmsClient) -- set this for
     # anything beyond a single local session so secrets survive a restart.
     SECRETS_LOCAL_DEV_KMS_KEY: str = ""
+    # Escape hatch: permit the non-production "local" secrets-KMS backend to
+    # run with a production-like ENVIRONMENT. Off by default so a real
+    # deployment that forgot to configure a real KMS fails fast at startup
+    # (see main.py's startup check) rather than silently protecting
+    # Secret.ciphertext with a local dev key -- which, with an unset
+    # SECRETS_LOCAL_DEV_KMS_KEY, is ephemeral and not decryptable after a
+    # restart (see secrets_kms.LocalDevSecretsKmsClient).
+    BOXKITE_ALLOW_INSECURE_LOCAL_KMS: bool = False
     # TTL for the per-session secret-capability token minted at session
     # create time (secret_capability.py) -- long enough to cover a whole
     # session's lifetime (bounded anyway by BOXKITE_MAX_SESSION_MINUTES),

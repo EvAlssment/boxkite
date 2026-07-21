@@ -121,6 +121,22 @@ class PodLifecycleMixin:
             _t_pod_created = _time.monotonic()
             logger.info(f"[TIMING] sandbox_pod_create: {(_t_pod_created - _t_claimed)*1000:.0f}ms")
 
+        # This create either drained a warm pod (claim) or found none (cold).
+        # Either way the warm pool is now below target, so nudge a top-up from
+        # the request path -- the timer-driven replenish loop stalls under a
+        # CPU-throttling serverless runtime (see schedule_replenish), leaving
+        # the pool permanently drained and every subsequent create cold. Best
+        # effort and non-blocking: it must never add latency to this create or
+        # fail it.
+        try:
+            from .warm_pool import get_warm_pool
+
+            warm_pool = await get_warm_pool()
+            if warm_pool is not None:
+                warm_pool.schedule_replenish()
+        except Exception as e:
+            logger.warning(f"[SandboxManager] Warm-pool replenish nudge failed (non-fatal): {e}")
+
         s3_prefix = self._build_storage_prefix(organization_id, session_id, work_item_id)
         normalized_upload_file_ids = upload_file_ids or []
 
@@ -894,7 +910,22 @@ class SandboxManager(
 
         # Docker Compose mode - single shared sidecar
         if self._use_docker_compose:
-            self._compose_url = os.environ.get("SIDECAR_URL", "http://localhost:8080")
+            env_url = os.environ.get("SIDECAR_URL")
+            # `boxkite up` persists the sidecar token + URL to
+            # ~/.boxkite/local.env; load them here so library users and example
+            # scripts don't have to re-export SIDECAR_AUTH_TOKEN/SIDECAR_URL by
+            # hand after `boxkite up`. Explicit env vars always win.
+            if not self._compose_auth_token or not env_url:
+                from .local_env import read_local_env_credentials
+
+                creds = read_local_env_credentials()
+                if creds is not None:
+                    file_url, file_token = creds
+                    if not self._compose_auth_token:
+                        self._compose_auth_token = file_token
+                    if not env_url:
+                        env_url = file_url
+            self._compose_url = env_url or "http://localhost:8080"
             logger.info(f"[SandboxManager] Running in Docker Compose mode, sidecar at {self._compose_url}")
 
 
