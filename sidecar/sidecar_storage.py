@@ -45,6 +45,18 @@ class S3Backend(StorageBackend):
         kwargs = {"region_name": main.AWS_REGION}
         if main.S3_ENDPOINT:
             kwargs["endpoint_url"] = main.S3_ENDPOINT
+            # boto3/botocore >= 1.36 attach flexible-checksum headers
+            # (x-amz-sdk-checksum-algorithm / x-amz-checksum-crc32) to PutObject
+            # by default. Non-AWS S3-compatible endpoints -- GCS's XML API,
+            # MinIO, Cloudflare R2 -- reject those and fail every upload with
+            # SignatureDoesNotMatch. Restrict checksums to operations that truly
+            # require them (the pre-1.36 behavior), which those endpoints accept.
+            from botocore.config import Config
+
+            kwargs["config"] = Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            )
         if main.AWS_ACCESS_KEY_ID:
             kwargs["aws_access_key_id"] = main.AWS_ACCESS_KEY_ID
             kwargs["aws_secret_access_key"] = main.AWS_SECRET_ACCESS_KEY
