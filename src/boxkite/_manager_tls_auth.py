@@ -407,6 +407,23 @@ class TlsAuthMixin:
         _, cert_pem = await self._ensure_pod_secret_cached(pod_name)
         return cert_pem
 
+    def _seed_pod_secret_cache(self, pod_name: str, token: str, cert_pem: str) -> None:
+        """Seed the per-pod auth-token/TLS-cert cache from values already
+        read elsewhere (the warm-pool fast-claim ready index), so the claim
+        hot path skips the Secret read `_ensure_pod_secret_cached` would
+        otherwise do. Marks the pod fetched so a later
+        `_ensure_pod_secret_cached` call short-circuits instead of re-reading
+        -- same bookkeeping that method itself does on a real read.
+        """
+        if token:
+            self._cache_pod_auth_token(pod_name, token)
+        if cert_pem:
+            self._cache_pod_tls_cert(pod_name, cert_pem)
+        self._pod_secrets_fetched[pod_name] = True
+        self._pod_secrets_fetched.move_to_end(pod_name)
+        while len(self._pod_secrets_fetched) > SANDBOX_HTTP_CLIENT_CACHE_MAX_ENTRIES:
+            self._pod_secrets_fetched.popitem(last=False)
+
     def _auth_headers_for_pod(self, pod_name: str) -> dict:
         token = self._get_pod_auth_token(pod_name)
         if not token:

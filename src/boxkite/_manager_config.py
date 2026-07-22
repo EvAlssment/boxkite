@@ -44,6 +44,7 @@ from .resource_config import (
     build_sandbox_pod_volumes,
     build_sidecar_container_resources,
     build_sidecar_exec_network_isolation_env,
+    fast_claim_enabled,
     gpu_enabled,
     kata_runtime_class_name,
     max_active_deadline_seconds,

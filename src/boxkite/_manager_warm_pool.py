@@ -4,6 +4,12 @@ from ._manager_config import *  # noqa: F401,F403
 import boxkite.manager as _manager_pkg
 from .warm_pool_sizing import CLAIM_RATE_TRACKER
 
+# How many stale/lost ready-index entries the fast-claim path will pop-and-CAS
+# before giving up and falling back to the list-based path. Bounds the work a
+# poisoned index (e.g. all entries just claimed by another instance) can add.
+FAST_CLAIM_MAX_CAS_ATTEMPTS = 3
+
+
 class WarmPoolMixin:
     async def _claim_warm_pod_via_k8s(self, size: str = DEFAULT_SANDBOX_SIZE) -> Optional[tuple[str, str]]:
         """
@@ -26,6 +32,18 @@ class WarmPoolMixin:
             claim_age_buffer_seconds=SANDBOX_WARM_CLAIM_AGE_BUFFER_SECONDS,
             min_remaining_lifetime_seconds=SANDBOX_WARM_MIN_REMAINING_LIFETIME_SECONDS,
         )
+        # Opt-in fast path (BOXKITE_FAST_CLAIM_ENABLED): pop a ready pod from
+        # the warm pool's in-memory index and claim it without a per-request
+        # pod LIST or Secret READ. Returns None -- and falls through to the
+        # unchanged list-based path below -- whenever the index is empty, the
+        # candidates all lost the compare-and-swap race, or anything errors,
+        # so the fast path is never worse than the default. Flag OFF makes
+        # this branch vanish and the claim path stays byte-identical to
+        # before.
+        if fast_claim_enabled():
+            fast_result = await self._fast_claim_warm_pod(size, _t0)
+            if fast_result is not None:
+                return fast_result
         try:
             pods = await self._k8s_core_api.list_namespaced_pod(
                 namespace=SANDBOX_NAMESPACE,
@@ -135,6 +153,127 @@ class WarmPoolMixin:
                 f"[SandboxManager] K8s warm pod discovery failed; falling back to a "
                 f"cold pod create for this session: {e}"
             )
+
+        return None
+
+    async def _mark_pod_non_evictable_async(self, pod_name: str) -> None:
+        """Fire-and-forget annotate of a just-claimed pod as non-evictable.
+        Mirrors the nested annotate in the list-based claim path; kept as a
+        method so the fast path can schedule it via asyncio.create_task
+        without duplicating the try/except inline."""
+        try:
+            await self._k8s_core_api.patch_namespaced_pod(
+                name=pod_name,
+                namespace=SANDBOX_NAMESPACE,
+                body={"metadata": {"annotations": {SAFE_TO_EVICT_ANNOTATION: "false"}}},
+            )
+        except Exception as annotation_error:
+            logger.warning(
+                f"[SandboxManager] Failed to mark claimed pod {pod_name} "
+                f"as non-evictable: {annotation_error}"
+            )
+
+    async def _fast_claim_warm_pod(
+        self, size: str, _t0: float
+    ) -> Optional[tuple[str, str]]:
+        """Fast warm-pod claim off the WarmPoolManager's in-memory ready
+        index (opt-in, BOXKITE_FAST_CLAIM_ENABLED). See
+        _claim_warm_pod_via_k8s for how this fits in.
+
+        Removes the two per-request K8s round-trips the list-based path pays
+        -- the pod LIST and the sidecar-Secret READ -- while KEEPING the
+        compare-and-swap label patch as the correctness arbiter: a pod is
+        never returned without a successful CAS, so a stale index entry (lost
+        the race, already claimed, resourceVersion moved on) just fails the
+        CAS and we try the next candidate. Returns None on an empty index, on
+        exhausting the retry budget, or on any error -- the caller then falls
+        back to the unchanged list-based path.
+        """
+        import time as _time
+
+        from .warm_pool import get_warm_pool
+
+        try:
+            warm_pool = await get_warm_pool()
+        except Exception as e:
+            logger.warning(
+                f"[SandboxManager] fast-claim: get_warm_pool failed; "
+                f"falling back to list-based claim: {e}"
+            )
+            return None
+        if warm_pool is None:
+            return None
+
+        attempts = 0
+        while attempts < FAST_CLAIM_MAX_CAS_ATTEMPTS:
+            try:
+                ready = await warm_pool.pop_ready_pod(size)
+            except Exception as e:
+                logger.warning(
+                    f"[SandboxManager] fast-claim: ready-index pop failed; "
+                    f"falling back to list-based claim: {e}"
+                )
+                return None
+            if ready is None:
+                return None
+            attempts += 1
+            if not ready.resource_version:
+                continue
+            try:
+                await self._k8s_core_api.patch_namespaced_pod(
+                    name=ready.pod_name,
+                    namespace=SANDBOX_NAMESPACE,
+                    body=[
+                        {"op": "test", "path": "/metadata/resourceVersion", "value": ready.resource_version},
+                        {"op": "test", "path": "/metadata/labels/pool", "value": "warm"},
+                        {
+                            "op": "test",
+                            "path": "/metadata/labels/sandbox.boxkite.dev~1status",
+                            "value": "warm",
+                        },
+                        {"op": "replace", "path": "/metadata/labels/pool", "value": "claimed"},
+                        {
+                            "op": "replace",
+                            "path": "/metadata/labels/sandbox.boxkite.dev~1status",
+                            "value": "claimed",
+                        },
+                    ],
+                )
+            except ApiException as e:
+                if e.status in {409, 422}:
+                    logger.info(
+                        f"[SandboxManager] fast-claim: warm pod {ready.pod_name} "
+                        f"lost CAS ({e.status}); trying next candidate"
+                    )
+                    continue
+                logger.warning(
+                    f"[SandboxManager] fast-claim: patch failed for {ready.pod_name} "
+                    f"({e.status}); falling back to list-based claim"
+                )
+                return None
+            except Exception as e:
+                logger.warning(
+                    f"[SandboxManager] fast-claim: unexpected patch error for "
+                    f"{ready.pod_name}; falling back to list-based claim: {e}"
+                )
+                return None
+
+            asyncio.create_task(self._mark_pod_non_evictable_async(ready.pod_name))
+            # Precomputed connect info skips the hot-path Secret read. If the
+            # index entry somehow lacks the token (edge case), recover it the
+            # slow way rather than handing back a pod we can't authenticate to.
+            if ready.auth_token:
+                self._seed_pod_secret_cache(
+                    ready.pod_name, ready.auth_token, ready.tls_cert_pem
+                )
+            else:
+                await self._ensure_pod_secret_cached(ready.pod_name)
+            CLAIM_RATE_TRACKER.record_claim(size)
+            logger.info(f"[TIMING] fast_claim: {(_time.monotonic() - _t0)*1000:.0f}ms")
+            logger.info(
+                f"[SandboxManager] Fast-claimed warm pod via ready index: {ready.pod_name}"
+            )
+            return (ready.pod_name, ready.pod_ip)
 
         return None
 

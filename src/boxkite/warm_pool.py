@@ -10,6 +10,8 @@ import base64
 import logging
 import os
 import ssl
+from collections import deque
+from dataclasses import dataclass
 from typing import Optional
 from uuid import uuid4
 
@@ -44,6 +46,7 @@ from .resource_config import (
     build_sandbox_pod_volumes,
     build_sidecar_container_resources,
     build_sidecar_exec_network_isolation_env,
+    fast_claim_enabled,
     kata_runtime_class_name,
 )
 from .sidecar_auth import (
@@ -223,6 +226,28 @@ def _decode_sidecar_tls_cert_from_secret(secret) -> str:
         return ""
 
 
+@dataclass(frozen=True)
+class ReadyPod:
+    """A claim-ready warm pod snapshotted by the background scan for the
+    opt-in fast-claim path (BOXKITE_FAST_CLAIM_ENABLED).
+
+    Carries everything the claim hot path needs so it can skip both the
+    per-request pod LIST and the per-pod Secret READ: the pod's identity/IP,
+    the resourceVersion the compare-and-swap patch tests against, its size,
+    and the precomputed sidecar auth token + pinned TLS cert. This is only a
+    hint -- the CAS patch on the hot path stays the source of truth, so a
+    stale entry (resourceVersion moved on, pod already claimed/gone) simply
+    fails the CAS and the caller falls back to the list-based path.
+    """
+
+    pod_name: str
+    pod_ip: str
+    resource_version: str
+    size: str
+    auth_token: str
+    tls_cert_pem: str
+
+
 class WarmPoolManager:
     """Manages warm sandbox pods using K8s labels as source of truth."""
 
@@ -239,6 +264,13 @@ class WarmPoolManager:
         self._manual_replenish_task: Optional[asyncio.Task] = None
         self._running = False
         self._lifecycle_lock = asyncio.Lock()
+        # Opt-in fast-claim ready-pod index (BOXKITE_FAST_CLAIM_ENABLED):
+        # per-size FIFO of claim-ready pods snapshotted by the background
+        # scan (see _refresh_ready_index). Empty and never touched when the
+        # flag is off. Guarded by its own asyncio.Lock so a claim's popleft
+        # and a scan's rebuild can't interleave.
+        self._ready_index: dict[str, deque[ReadyPod]] = {}
+        self._ready_index_lock = asyncio.Lock()
 
     async def _init_k8s(self):
         """Initialize K8s client."""
@@ -471,6 +503,98 @@ class WarmPoolManager:
             logger.warning(f"[WarmPool] Failed to read sidecar-auth secret {secret_name}: {e}")
             return ""
         return _decode_sidecar_tls_cert_from_secret(secret)
+
+    # =========================================================================
+    # Fast-claim ready-pod index (opt-in, BOXKITE_FAST_CLAIM_ENABLED)
+    # =========================================================================
+
+    async def pop_ready_pod(self, size: str = DEFAULT_SANDBOX_SIZE) -> Optional[ReadyPod]:
+        """Atomically remove and return the next ready pod of `size` from the
+        in-memory index, or None if that size's index is empty.
+
+        A pop removes the entry so the same pod is never handed to two
+        concurrent claims; the caller must still win the K8s compare-and-swap
+        before treating it as claimed (a failed CAS just means the entry was
+        stale -- pop the next one)."""
+        async with self._ready_index_lock:
+            dq = self._ready_index.get(size)
+            if not dq:
+                return None
+            return dq.popleft()
+
+    async def _read_pod_token_and_cert(self, pod_name: str) -> tuple[str, str]:
+        """Read a pod's sidecar auth token AND pinned TLS cert from its
+        single per-pod Secret in one round-trip. Used only at index-population
+        time (the background scan), never on the claim hot path. Returns
+        ("", "") on any read failure -- the fast claim then falls back to the
+        manager's own Secret read for that pod."""
+        if not self._k8s_core_api:
+            return "", ""
+        secret_name = sidecar_auth_secret_name(pod_name)
+        try:
+            secret = await self._k8s_core_api.read_namespaced_secret(
+                name=secret_name, namespace=SANDBOX_NAMESPACE
+            )
+        except Exception as e:
+            logger.warning(f"[WarmPool] Failed to read sidecar-auth secret {secret_name}: {e}")
+            return "", ""
+        return (
+            _decode_sidecar_auth_token_from_secret(secret),
+            _decode_sidecar_tls_cert_from_secret(secret),
+        )
+
+    async def _refresh_ready_index(
+        self, ready_candidates: list[tuple[str, str, str, str]]
+    ) -> None:
+        """Rebuild the ready-pod index from the current scan's claim-ready
+        warm pods.
+
+        `ready_candidates` is a list of (pod_name, pod_ip, resource_version,
+        size) tuples produced by _scan_pool_state -- already filtered to
+        Running, all-containers-ready, right-age warm pods, so no extra pod
+        LIST happens here. The precomputed sidecar auth token + TLS cert are
+        carried forward from the previous index entry for a pod that's still
+        present (its Secret is immutable for the pod's lifetime), and only
+        read fresh (one Secret read) for a pod newly appearing in the pool --
+        so a steady-state pool costs zero Secret reads per refresh.
+
+        Rebuilds from scratch each call, so pods that have left the pool
+        (claimed, deleted, aged out) drop out naturally.
+        """
+        async with self._ready_index_lock:
+            previous = {
+                rp.pod_name: rp for dq in self._ready_index.values() for rp in dq
+            }
+
+        new_index: dict[str, deque[ReadyPod]] = {}
+        for pod_name, pod_ip, resource_version, size in ready_candidates:
+            prior = previous.get(pod_name)
+            if prior is not None and prior.auth_token:
+                auth_token, tls_cert_pem = prior.auth_token, prior.tls_cert_pem
+            else:
+                auth_token, tls_cert_pem = await self._read_pod_token_and_cert(pod_name)
+            new_index.setdefault(size, deque()).append(
+                ReadyPod(
+                    pod_name=pod_name,
+                    pod_ip=pod_ip,
+                    resource_version=resource_version,
+                    size=size,
+                    auth_token=auth_token,
+                    tls_cert_pem=tls_cert_pem,
+                )
+            )
+
+        async with self._ready_index_lock:
+            self._ready_index = new_index
+
+    async def _discard_from_ready_index(self, pod_name: str) -> None:
+        """Remove any index entry for a pod being deleted, so a stale entry
+        can't be popped between a delete and the next scan rebuild."""
+        async with self._ready_index_lock:
+            for dq in self._ready_index.values():
+                for entry in list(dq):
+                    if entry.pod_name == pod_name:
+                        dq.remove(entry)
 
     async def recycle_pod(self, pod_name: str, pod_ip: str) -> bool:
         """Recycle pod by wiping sidecar state and restoring warm labels."""
@@ -836,6 +960,7 @@ class WarmPoolManager:
         """Delete a pod and its companion sidecar-auth Secret."""
         if not self._k8s_core_api:
             return
+        await self._discard_from_ready_index(pod_name)
         try:
             await self._k8s_core_api.delete_namespaced_pod(
                 name=pod_name,
@@ -912,7 +1037,9 @@ class WarmPoolManager:
         except Exception as e:
             logger.error(f"[WarmPool] Request-driven replenish error: {e}")
 
-    async def _scan_pool_state(self) -> tuple[dict[str, int], int, dict[str, int], list[str]]:
+    async def _scan_pool_state(
+        self,
+    ) -> tuple[dict[str, int], int, dict[str, int], list[str], list[tuple[str, str, str, str]]]:
         """Scan all sandbox pods and classify them.
 
         Returns:
@@ -929,9 +1056,15 @@ class WarmPoolManager:
                           phase == "Running") ever revisits a terminal pod.
                           These don't count toward warm_by_size so the
                           replenish loop creates fresh replacements.
+            ready_candidates: (pod_name, pod_ip, resource_version, size) for
+                          every pod counted in warm_by_size -- the same
+                          claim-ready set, carried out so the opt-in
+                          fast-claim ready index can be rebuilt from this one
+                          scan without a second pod LIST. Only consumed when
+                          BOXKITE_FAST_CLAIM_ENABLED is on.
         """
         if not self._k8s_core_api:
-            return ({}, 0, {}, [])
+            return ({}, 0, {}, [], [])
         try:
             pods = await self._k8s_core_api.list_namespaced_pod(
                 namespace=SANDBOX_NAMESPACE,
@@ -939,7 +1072,7 @@ class WarmPoolManager:
             )
         except Exception as e:
             logger.warning(f"[WarmPool] Failed to list pods for status: {e}")
-            return ({}, 0, {}, [])
+            return ({}, 0, {}, [], [])
 
         max_claimable_age = compute_max_claimable_age_seconds(
             active_deadline_seconds=SANDBOX_ACTIVE_DEADLINE_SECONDS,
@@ -950,6 +1083,7 @@ class WarmPoolManager:
         total_active = 0
         by_state: dict[str, int] = {}
         stale_pods: list[str] = []
+        ready_candidates: list[tuple[str, str, str, str]] = []
         for pod in pods.items:
             labels = pod.metadata.labels or {}
             phase = pod.status.phase
@@ -975,12 +1109,21 @@ class WarmPoolManager:
                     continue
                 size = labels.get(SANDBOX_SIZE_LABEL) or DEFAULT_SANDBOX_SIZE
                 warm_by_size[size] = warm_by_size.get(size, 0) + 1
+                if pod.status.pod_ip and pod.metadata.resource_version:
+                    ready_candidates.append(
+                        (
+                            pod.metadata.name,
+                            pod.status.pod_ip,
+                            pod.metadata.resource_version,
+                            size,
+                        )
+                    )
 
-        return (warm_by_size, total_active, by_state, stale_pods)
+        return (warm_by_size, total_active, by_state, stale_pods, ready_candidates)
 
     async def _get_pool_counts(self) -> tuple[dict[str, int], int, dict[str, int]]:
         """Return (warm_by_size, total_active, by_state) from K8s labels."""
-        warm_by_size, total_active, by_state, _ = await self._scan_pool_state()
+        warm_by_size, total_active, by_state, _, _ = await self._scan_pool_state()
         return (warm_by_size, total_active, by_state)
 
     def _current_warm_pool_size_targets(self) -> dict[str, int]:
@@ -1012,7 +1155,15 @@ class WarmPoolManager:
            order -- small, medium, large -- so a small deficit is topped
            up before a large one when budget is scarce).
         """
-        warm_by_size, total_active, _, stale_pods = await self._scan_pool_state()
+        warm_by_size, total_active, _, stale_pods, ready_candidates = await self._scan_pool_state()
+        # Refresh the opt-in fast-claim ready index off this same scan (no
+        # extra pod LIST). Kept off the flag-off path entirely so it costs
+        # nothing when disabled.
+        if fast_claim_enabled():
+            try:
+                await self._refresh_ready_index(ready_candidates)
+            except Exception as e:
+                logger.warning(f"[WarmPool] Failed to refresh fast-claim ready index: {e}")
         max_claimable_age = compute_max_claimable_age_seconds(
             active_deadline_seconds=SANDBOX_ACTIVE_DEADLINE_SECONDS,
             claim_age_buffer_seconds=SANDBOX_WARM_CLAIM_AGE_BUFFER_SECONDS,

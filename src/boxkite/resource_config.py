@@ -218,6 +218,25 @@ def kata_runtime_class_enabled() -> bool:
     return _env_flag(BOXKITE_KATA_RUNTIME_CLASS_ENABLED_ENV, "false")
 
 
+# Opt-in fast warm-pod claim path (docs/BENCHMARKS.md, issue #178 follow-up).
+#
+# When on, SandboxManager._claim_warm_pod_via_k8s pops a candidate from the
+# WarmPoolManager's in-memory ready-pod index (populated off the existing
+# background scan) instead of issuing a per-request list_namespaced_pod, and
+# seeds the sidecar auth token / TLS cert from that index entry instead of
+# reading the pod's Secret on the hot path -- removing the LIST and the
+# Secret-READ round-trips from the claim. The compare-and-swap label patch
+# still happens on the hot path and remains the source of truth, so the
+# index is only a hint: a stale/lost entry fails the CAS and falls back to
+# the unchanged list-based path. Off by default; flag-OFF leaves the claim
+# path byte-identical to the pre-fast-claim behavior.
+BOXKITE_FAST_CLAIM_ENABLED_ENV = "BOXKITE_FAST_CLAIM_ENABLED"
+
+
+def fast_claim_enabled() -> bool:
+    return _env_flag(BOXKITE_FAST_CLAIM_ENABLED_ENV, "false")
+
+
 # Opt-in GPU support (docs/GPU-SUPPORT-SCOPING.md).
 #
 # STATUS: implemented against the real Kubernetes GPU-scheduling API shape
