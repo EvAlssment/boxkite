@@ -23,7 +23,12 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/EvAlssment/boxkite/raw/main/assets/boxkite-platform.mp4" poster="https://github.com/EvAlssment/boxkite/raw/main/assets/boxkite-platform-poster.jpg" controls muted loop playsinline width="800"></video>
+  <a href="https://boxkite-site.vercel.app" title="Watch the boxkite demo">
+    <img src="assets/boxkite-platform-poster.jpg" alt="boxkite platform overview — click to watch the demo" width="800">
+  </a>
+</p>
+<p align="center">
+  <a href="https://boxkite-site.vercel.app">▶ Watch the demo</a>
 </p>
 
 **The missing batteries-included, self-hostable sandbox for agent code execution.**
