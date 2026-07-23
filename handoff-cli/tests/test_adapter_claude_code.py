@@ -45,7 +45,7 @@ def _adapter(config_dir: Path, cwd: Path) -> ClaudeCodeAdapter:
 
 class TestEncodeProjectDir:
     def test_replaces_slashes_with_dashes(self) -> None:
-        assert encode_project_dir("/Users/harshit/Desktop/boxkite") == "-Users-harshit-Desktop-boxkite"
+        assert encode_project_dir("/Users/dev/Desktop/boxkite") == "-Users-dev-Desktop-boxkite"
 
     def test_replaces_dots_with_dashes(self) -> None:
         assert encode_project_dir("/Users/h/.hidden.dir/sub") == "-Users-h--hidden-dir-sub"

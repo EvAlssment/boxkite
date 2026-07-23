@@ -365,7 +365,7 @@ STORAGE_S3_KMS_KEY_ID = os.environ.get("STORAGE_S3_KMS_KEY_ID") or os.environ.ge
 STORAGE_S3_BUCKET_KEY_ENABLED = (
     os.environ.get("STORAGE_S3_BUCKET_KEY_ENABLED") or os.environ.get("S3_BUCKET_KEY_ENABLED", "true")
 )
-# Use existing secrets: 'boxkite-storage-credentials' for dev, 'fpaiplatform-secrets' for staging
+# Name of an existing Secret holding S3 credentials; override per environment
 STORAGE_CREDENTIALS_SECRET = os.environ.get("STORAGE_CREDENTIALS_SECRET", "boxkite-storage-credentials")
 
 SAFE_TO_EVICT_ANNOTATION = "cluster-autoscaler.kubernetes.io/safe-to-evict"

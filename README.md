@@ -14,11 +14,16 @@
 </p>
 
 <p align="center">
+  <a href="https://boxkite-site.vercel.app">Website</a> ·
   <a href="#quickstart">Quickstart</a> ·
-  <a href="https://boxkite-site.vercel.app/developers">Docs &amp; website</a> ·
+  <a href="https://boxkite-site.vercel.app/developers">Docs</a> ·
   <a href="#self-hosting">Self-hosting</a> ·
   <a href="#security">Security</a> ·
   <a href="examples/">Examples</a>
+</p>
+
+<p align="center">
+  <video src="https://github.com/EvAlssment/boxkite/raw/main/assets/boxkite-platform.mp4" poster="https://github.com/EvAlssment/boxkite/raw/main/assets/boxkite-platform-poster.jpg" controls muted loop playsinline width="800"></video>
 </p>
 
 **The missing batteries-included, self-hostable sandbox for agent code execution.**
